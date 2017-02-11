@@ -55,7 +55,7 @@ EPS = 1e-12
 CROP_SIZE = 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, discrim_train, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, train")
 
 
 def conv(batch_input, out_channels, stride):
@@ -379,13 +379,14 @@ def create_model(inputs, targets):
 
         return layers[-1]
 
-    def create_discriminator(discrim_inputs, discrim_targets):
+    def create_discriminator(discrim_targets):
         n_layers = 3
         layers = []
 
         # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
         # input = tf.concat_v2([discrim_inputs, discrim_targets], axis=3)
-        input = tf.concat(3, [discrim_inputs, discrim_targets])
+        # input = tf.concat(3, [discrim_inputs, discrim_targets])
+        input = discrim_targets
 
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
@@ -407,13 +408,9 @@ def create_model(inputs, targets):
 
         # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-            # convolved = conv(rectified, out_channels=1, stride=1)
-            # output = tf.sigmoid(convolved)
-            # layers.append(output)
-
-            # With WGAN, sigmoid for the last layer is no longer needed
             convolved = conv(rectified, out_channels=1, stride=1)
-            layers.append(convolved)
+            output = tf.sigmoid(convolved)
+            layers.append(output)
 
         return layers[-1]
 
@@ -426,52 +423,36 @@ def create_model(inputs, targets):
     with tf.name_scope("real_discriminator"):
         with tf.variable_scope("discriminator"):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real = create_discriminator(inputs, targets)
+            predict_real = create_discriminator(targets)
 
     with tf.name_scope("fake_discriminator"):
         with tf.variable_scope("discriminator", reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake = create_discriminator(inputs, outputs)
+            predict_fake = create_discriminator(outputs)
 
     with tf.name_scope("discriminator_loss"):
-        # # minimizing -tf.log will try to get inputs to 1
-        # # predict_real => 1
-        # # predict_fake => 0
-        # discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
-
-        # Use wgan loss
-        discrim_loss = -tf.reduce_mean(predict_real) + tf.reduce_mean(predict_fake)
+        # minimizing -tf.log will try to get inputs to 1
+        # predict_real => 1
+        # predict_fake => 0
+        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
 
     with tf.name_scope("generator_loss"):
-        # # predict_fake => 1
-        # # abs(targets - outputs) => 0
-        # gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
-        # gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        # gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
-
-        # WGAN loss
-        gen_loss_GAN = -tf.reduce_mean(predict_fake)
+        # predict_fake => 1
+        # abs(targets - outputs) => 0
+        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
-        # gen_loss = gen_loss_GAN * a.gan_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
         discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-        # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
-
-        # WGAN adds a clip and train discriminator 5 times
-        discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
-        discrim_clips = [var.assign(tf.clip_by_value(var, -0.01, 0.01)) for var in discrim_tvars]
-        # No difference between control dependencies and group.
-        with tf.control_dependencies([discrim_min] + discrim_clips):
-            discrim_train = tf.no_op(name='discrim_train')
+        discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
 
     with tf.name_scope("generator_train"):
-        # with tf.control_dependencies([discrim_train]):
-        gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
-        gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-        gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+        with tf.control_dependencies([discrim_train]):
+            gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
+            gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
@@ -486,7 +467,6 @@ def create_model(inputs, targets):
         gen_loss_GAN=ema.average(gen_loss_GAN),
         gen_loss_L1=ema.average(gen_loss_L1),
         outputs=outputs,
-        discrim_train=tf.group(discrim_train),
         train=tf.group(update_losses, incr_global_step, gen_train),
     )
 
@@ -690,8 +670,6 @@ def main():
                     options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                     run_metadata = tf.RunMetadata()
 
-                discrim_train_fetches = {"discrim_train":model.discrim_train}
-
                 fetches = {
                     "train": model.train,
                     "global_step": sv.global_step,
@@ -707,9 +685,6 @@ def main():
 
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
-
-                for _ in range(5):
-                    sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
 
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
 
@@ -768,9 +743,4 @@ python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20
 
 """
 python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
-"""
-
-"""
-python pix2pix_wgan.py --mode train --output_dir facades_train_wgan --max_epochs 200 --input_dir ../pix2pix-tensorflow/facades/train --which_direction BtoA --display_freq=5000
-python pix2pix_wgan.py --mode test --output_dir facades_test_wgan --input_dir ../pix2pix-tensorflow/facades/val --checkpoint facades_train_wgan
 """

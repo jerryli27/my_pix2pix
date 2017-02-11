@@ -379,13 +379,14 @@ def create_model(inputs, targets):
 
         return layers[-1]
 
-    def create_discriminator(discrim_inputs, discrim_targets):
+    def create_discriminator(discrim_targets):
         n_layers = 3
         layers = []
 
         # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
         # input = tf.concat_v2([discrim_inputs, discrim_targets], axis=3)
-        input = tf.concat(3, [discrim_inputs, discrim_targets])
+        # input = tf.concat(3, [discrim_inputs, discrim_targets])
+        input = discrim_targets
 
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
@@ -426,12 +427,12 @@ def create_model(inputs, targets):
     with tf.name_scope("real_discriminator"):
         with tf.variable_scope("discriminator"):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real = create_discriminator(inputs, targets)
+            predict_real = create_discriminator(targets)
 
     with tf.name_scope("fake_discriminator"):
         with tf.variable_scope("discriminator", reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake = create_discriminator(inputs, outputs)
+            predict_fake = create_discriminator(outputs)
 
     with tf.name_scope("discriminator_loss"):
         # # minimizing -tf.log will try to get inputs to 1
