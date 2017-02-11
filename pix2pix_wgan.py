@@ -712,7 +712,6 @@ def main():
                     sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
 
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
-                print(results)
 
                 if should(a.summary_freq):
                     sv.summary_writer.add_summary(results["summary"], results["global_step"])
@@ -770,3 +769,6 @@ python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20
 """
 python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
 """
+
+"""
+python pix2pix_wgan.py --mode train --output_dir facades_train_wgan --max_epochs 200 --input_dir ../pix2pix-tensorflow/facades/train --which_direction BtoA --display_freq=5000"""
