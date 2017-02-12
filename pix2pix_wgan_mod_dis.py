@@ -458,7 +458,9 @@ def create_model(inputs, targets):
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
-        discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        # discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        # WGAN does not use momentum based optimizer
+        discrim_optim = tf.train.RMSPropOptimizer(a.lr)
         # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
 
         # WGAN adds a clip and train discriminator 5 times
@@ -469,10 +471,12 @@ def create_model(inputs, targets):
             discrim_train = tf.no_op(name='discrim_train')
 
     with tf.name_scope("generator_train"):
-        # with tf.control_dependencies([discrim_train]):
-        gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
-        gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-        gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+        with tf.control_dependencies([discrim_train]):
+            gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
+            # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            # WGAN does not use momentum based optimizer
+            gen_optim = tf.train.RMSPropOptimizer(a.lr)
+            gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
@@ -691,7 +695,10 @@ def main():
                     options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                     run_metadata = tf.RunMetadata()
 
-                discrim_train_fetches = {"discrim_train":model.discrim_train}
+                discrim_train_fetches = {
+                    "discrim_train":model.discrim_train,
+                    "global_step": sv.global_step
+                }
 
                 fetches = {
                     "train": model.train,
@@ -709,7 +716,7 @@ def main():
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
 
-                for _ in range(5):
+                for _ in range(4):
                     sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
 
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
@@ -764,7 +771,7 @@ sanity_check_train
 AtoB
 """
 """
-python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20 --input_dir /home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
+python pix2pix_wgan_mod_dis.py --mode train --output_dir pixiv_full_128_train_wgan_mod_dis --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
 """
 
 """
@@ -772,6 +779,6 @@ python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/
 """
 
 """
-python pix2pix_wgan.py --mode train --output_dir facades_train_wgan --max_epochs 200 --input_dir ../pix2pix-tensorflow/facades/train --which_direction BtoA --display_freq=5000
+python pix2pix_wgan_mod_dis.py --mode train --output_dir facades_train_wgan_mod_dis --max_epochs 200 --input_dir ../pix2pix-tensorflow/facades/train --which_direction BtoA --display_freq=5000
 python pix2pix_wgan.py --mode test --output_dir facades_test_wgan --input_dir ../pix2pix-tensorflow/facades/val --checkpoint facades_train_wgan
 """
