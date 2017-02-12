@@ -163,39 +163,3 @@ def total_variation(image_batch):
         vertical_diff) / num_pixels_in_vertical_diff)
 
     return total_var
-
-
-def precompute_image_features(img, layers, shape, vgg_data, mean_pixel, use_mrf, use_semantic_masks):
-    # type: (np.ndarray, Union[Tuple[str], List[str]], Union[Tuple[int], List[int]], Dict[str, np.ndarray], List[float], bool, bool) -> Dict[str, np.ndarray]
-    """
-    Precompute the features of the image by passing it through the vgg network and storing the computed layers.
-    :param img: the image of which the features would be precomputed. It must have shape (height, width, 3)
-    :param layers: A list of string specifying which layers would we be returning. Check vgg.py for layer names.
-    :param shape: shape of the image placeholder.
-    :param vgg_data: The vgg network represented as a dictionary. It can be obtained by vgg.pre_read_net.
-    :param mean_pixel: The mean pixel value for the vgg network. It can be obtained by vgg.read_net or just hardcoded.
-    :param use_mrf: Whether we're using mrf loss. If true, it does not calculate and store the gram matrix.
-    :param use_semantic_masks: Whether we're using semantic masks. If true, it does not calculate and store the gram
-    matrix.
-    :return: A dictionary containing the precomputed feature for each layer.
-    """
-    features_dict = {}
-    g = tf.Graph()
-    # Choose to use cpu here because we only need to compute this once and using cpu would provide us more memory
-    # than the gpu and therefore allow us to process larger style images using the extra memory. This will not have
-    # an effect on the training speed later since the gram matrix size is not related to the size of the image.
-    with g.as_default(), g.device('/cpu:0'), tf.Session():
-        image = tf.placeholder('float', shape=shape)
-        net = vgg.pre_read_net(vgg_data, image)
-        style_pre = np.array([vgg.preprocess(img, mean_pixel)])
-        for layer in layers:
-            if use_mrf or use_semantic_masks:
-                features = net[layer].eval(feed_dict={image: style_pre})
-                features_dict[layer] = features
-            else:
-                # Calculate and store gramian.
-                features = net[layer].eval(feed_dict={image: style_pre})
-                features = np.reshape(features, (-1, features.shape[3]))
-                gram = np.matmul(features.T, features) / features.size
-                features_dict[layer] = gram
-    return features_dict

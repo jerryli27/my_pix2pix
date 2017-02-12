@@ -452,8 +452,8 @@ def create_model(inputs, targets):
         # WGAN loss
         gen_loss_GAN = -tf.reduce_mean(predict_fake)
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
-        # gen_loss = gen_loss_GAN * a.gan_weight
+        # gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+        gen_loss = gen_loss_GAN * a.gan_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
@@ -769,9 +769,7 @@ sanity_check_train
 AtoB
 """
 """
-python pix2pix_wgan_mod_dis.py --mode train --output_dir pixiv_full_128_train_wgan_mod_dis --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
-
-python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_train_wgan --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
+python pix2pix_wgan_only.py --mode train --output_dir pixiv_full_128_train_wgan_only --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 16 --lr=0.001
 """
 
 """
