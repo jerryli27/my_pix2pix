@@ -55,7 +55,7 @@ EPS = 1e-12
 CROP_SIZE = 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, discrim_train, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, discrim_train, train, train_l1")
 
 
 def conv(batch_input, out_channels, stride, shift, pad = 1):
@@ -482,8 +482,9 @@ def create_model(inputs, targets):
         # WGAN loss
         gen_loss_GAN = -tf.reduce_mean(predict_fake)
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        # gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
-        gen_loss = gen_loss_GAN * a.gan_weight
+        gen_loss_L1_times_weight = gen_loss_L1 * a.l1_weight
+        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+        # gen_loss = gen_loss_GAN * a.gan_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
@@ -505,6 +506,7 @@ def create_model(inputs, targets):
             # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
             gen_optim = tf.train.RMSPropOptimizer(a.lr)
             gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+            gen_train_l1 = gen_optim.minimize(gen_loss_L1_times_weight, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
@@ -521,6 +523,7 @@ def create_model(inputs, targets):
         outputs=outputs,
         discrim_train=tf.group(discrim_train),
         train=tf.group(update_losses, incr_global_step, gen_train),
+        train_l1=tf.group(update_losses, incr_global_step, gen_train_l1),
     )
 
 
@@ -728,10 +731,18 @@ def main():
                     "global_step": sv.global_step
                 }
 
-                fetches = {
-                    "train": model.train,
-                    "global_step": sv.global_step,
-                }
+                # Train first on l1 loss for several epochs, then on wgan for more epochs.
+                if step < examples.count * 4:
+                    fetches = {
+                        "train": model.train_l1,
+                        "global_step": sv.global_step,
+                    }
+                else:
+
+                    fetches = {
+                        "train": model.train,
+                        "global_step": sv.global_step,
+                    }
 
                 if should(a.progress_freq):
                     fetches["discrim_loss"] = model.discrim_loss
@@ -744,10 +755,16 @@ def main():
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
 
-                for _ in range(4):
-                    sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
 
-                results = sess.run(fetches, options=options, run_metadata=run_metadata)
+
+                # Train first on l1 loss for several epochs, then on wgan for more epochs.
+                if step < examples.count * 4:
+                    results = sess.run(fetches, options=options, run_metadata=run_metadata)
+                else:
+                    for _ in range(4):
+                        sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
+
+                    results = sess.run(fetches, options=options, run_metadata=run_metadata)
 
                 if should(a.summary_freq):
                     sv.summary_writer.add_summary(results["summary"], results["global_step"])
@@ -799,7 +816,9 @@ sanity_check_train
 AtoB
 """
 """
-python pix2pix_wgan_only.py --mode train --output_dir pixiv_full_128_train_wgan_only_small_lr --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=100 --gray_input_a --batch_size 32 --lr=0.00005
+python pix2pix_wgan_only_large.py --mode train --output_dir pixiv_full_128_train_wgan_only_large_small_lr --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=100 --gray_input_a --batch_size 32 --lr=0.00005
+
+python pix2pix_wgan_only_large.py --mode train --output_dir pixiv_full_128_train_wgan_only_large_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=100 --gray_input_a --batch_size 4 --lr=0.00005
 """
 
 """
