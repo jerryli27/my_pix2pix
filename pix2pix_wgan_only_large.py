@@ -39,8 +39,8 @@ parser.add_argument("--gray_input_a", action="store_true", help="Treat A image a
 parser.add_argument("--gray_input_b", action="store_true", help="Treat B image as grayscale image.")
 parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
-parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
-parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
+parser.add_argument("--ngf", type=int, default=32, help="number of generator filters in first conv layer")
+parser.add_argument("--ndf", type=int, default=32, help="number of discriminator filters in first conv layer")
 parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
@@ -58,13 +58,17 @@ Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, st
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, discrim_train, train")
 
 
-def conv(batch_input, out_channels, stride):
+def conv(batch_input, out_channels, stride, shift, pad = 1):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
-        filter = tf.get_variable("filter", [4, 4, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
+        filter = tf.get_variable("filter", [shift, shift, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
-        padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
+        if pad > 0:
+            padded_input = tf.pad(batch_input, [[0, 0], [pad, pad], [pad, pad], [0, 0]], mode="CONSTANT")
+        else:
+            assert pad == 0
+            padded_input = batch_input
         conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
         return conv
 
@@ -95,13 +99,13 @@ def batchnorm(input):
         return normalized
 
 
-def deconv(batch_input, out_channels):
+def deconv(batch_input, out_channels, stride, shift):
     with tf.variable_scope("deconv"):
         batch, in_height, in_width, in_channels = [int(d) for d in batch_input.get_shape()]
-        filter = tf.get_variable("filter", [4, 4, out_channels, in_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
+        filter = tf.get_variable("filter", [shift, shift, out_channels, in_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, out_channels, in_channels]
         #     => [batch, out_height, out_width, out_channels]
-        conv = tf.nn.conv2d_transpose(batch_input, filter, [batch, in_height * 2, in_width * 2, out_channels], [1, 2, 2, 1], padding="SAME")
+        conv = tf.nn.conv2d_transpose(batch_input, filter, [batch, in_height * stride, in_width * stride, out_channels], [1, stride, stride, 1], padding="SAME")
         return conv
 
 
@@ -312,55 +316,64 @@ def create_model(inputs, targets):
     def create_generator(generator_inputs, generator_outputs_channels):
         layers = []
 
-        # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+        # encoder_1: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
         with tf.variable_scope("encoder_1"):
-            output = conv(generator_inputs, a.ngf, stride=2)
+            output = conv(generator_inputs, a.ngf, stride=1, shift=3)
             layers.append(output)
 
         layer_specs = [
-            a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-            a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-            a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-            a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-            a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-            a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-            a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
+            a.ngf * 2, # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
+            a.ngf * 2, # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
+            a.ngf * 4, # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
+            a.ngf * 4, # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
+            a.ngf * 8, # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ngf * 8, # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
+            a.ngf * 16, # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
+            a.ngf * 16, # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
         ]
 
         for out_channels in layer_specs:
             with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
                 rectified = lrelu(layers[-1], 0.2)
-                # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                convolved = conv(rectified, out_channels, stride=2)
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(rectified, out_channels, stride=2, shift=4)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(rectified, out_channels, stride=1, shift=3)
                 output = batchnorm(convolved)
                 layers.append(output)
 
         layer_specs = [
-            (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-            (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-            (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-            (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-            (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-            (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-            (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+            (a.ngf * 16, 0.5),   # decoder_8: [batch, 16, 16, ngf * 16 * 2]=> [batch, 32, 32, ngf * 16]
+            (a.ngf * 8, 0.5),   # decoder_7: [batch, 32, 32, ngf * 16] => [batch, 32, 32, ngf * 8]
+            (a.ngf * 8, 0.5),   # decoder_6: [batch, 32, 32, ngf * 8 * 2] => [batch, 64, 64, ngf * 8]
+            (a.ngf * 4, 0.0),   # decoder_5: [batch, 64, 64, ngf * 8] => [batch, 64, 64, ngf * 4]
+            (a.ngf * 4, 0.0),   # decoder_4: [batch, 64, 64, ngf * 4 * 2] => [batch, 128, 128, ngf * 4]
+            (a.ngf * 2, 0.0),   # decoder_3: [batch, 128, 128, ngf * 4] => [batch, 128, 128, ngf * 2]
+            (a.ngf * 2, 0.0),       # decoder_2: [batch, 128, 128, ngf * 2 * 2] => [batch, 256, 256, ngf * 2]
+            (a.ngf * 1, 0.0),                 # decoder_1: [batch, 256, 256, ngf * 2] => [batch, 256, 256, ngf]
         ]
 
         num_encoder_layers = len(layers)
         for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
             skip_layer = num_encoder_layers - decoder_layer - 1
             with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-                if decoder_layer == 0:
+                if decoder_layer % 2 != 0:
                     # first decoder layer doesn't have skip connections
                     # since it is directly connected to the skip_layer
                     input = layers[-1]
+                    rectified = tf.nn.relu(input)
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    output = deconv(rectified, out_channels, 1, 3)
                 else:
                     # Can't find concat_v2 so commenting this out.
                     #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
                     input = tf.concat(3, [layers[-1], layers[skip_layer]])
 
-                rectified = tf.nn.relu(input)
-                # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-                output = deconv(rectified, out_channels)
+                    rectified = tf.nn.relu(input)
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                    output = deconv(rectified, out_channels, 2, 4)
                 output = batchnorm(output)
 
                 if dropout > 0.0:
@@ -373,7 +386,7 @@ def create_model(inputs, targets):
             #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
             input = tf.concat(3,[layers[-1], layers[0]])
             rectified = tf.nn.relu(input)
-            output = deconv(rectified, generator_outputs_channels)
+            output = deconv(rectified, generator_outputs_channels, 1, 3)
             output = tf.tanh(output)
             layers.append(output)
 
@@ -389,20 +402,36 @@ def create_model(inputs, targets):
 
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
-            convolved = conv(input, a.ndf, stride=2)
+            convolved = conv(input, a.ndf, stride=1, shift = 3)
             rectified = lrelu(convolved, 0.2)
             layers.append(rectified)
 
         # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
         # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
         # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
-        for i in range(n_layers):
+
+        layer_specs = [
+            a.ndf * 2,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
+            a.ndf * 2,  # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
+            a.ndf * 4,  # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
+            a.ndf * 4,  # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
+            a.ndf * 8,  # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ndf * 8,  # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
+            a.ndf * 16,  # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
+            a.ndf * 16,  # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
+        ]
+
+        for out_channels in layer_specs:
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-                out_channels = a.ndf * min(2**(i+1), 8)
-                stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
-                convolved = conv(layers[-1], out_channels, stride=stride)
-                normalized = batchnorm(convolved)
-                rectified = lrelu(normalized, 0.2)
+                normed = batchnorm(layers[-1])
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(normed, out_channels, stride=2, shift=4)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(normed, out_channels, stride=1, shift=3)
+
+                rectified = lrelu(convolved, 0.2)
                 layers.append(rectified)
 
         # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
@@ -412,7 +441,8 @@ def create_model(inputs, targets):
             # layers.append(output)
 
             # With WGAN, sigmoid for the last layer is no longer needed
-            convolved = conv(rectified, out_channels=1, stride=1)
+            normed = batchnorm(layers[-1])
+            convolved = conv(normed, out_channels=1, stride=1, shift=3)
             layers.append(convolved)
 
         return layers[-1]

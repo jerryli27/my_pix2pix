@@ -27,7 +27,7 @@ try:
 except NameError:
     from functools import reduce
 
-CONTENT_LAYER = 'layer_4'
+CONTENT_LAYER = 'layer_2'
 STYLE_LAYERS = ('layer_1', 'layer_2', 'layer_3', 'layer_4')  # This is used for texture generation (without content)
 STYLE_LAYERS_WITH_CONTENT = ('layer_1','layer_2', 'layer_3', 'layer_4')# ('layer_1', 'layer_2', 'layer_3', 'layer_4')
 STYLE_LAYERS_MRF = ('relu3_1', 'relu4_1')  # According to https://arxiv.org/abs/1601.04589.
@@ -117,16 +117,18 @@ def stylize(network, content, styles, shape, iterations, save_dir, content_weigh
     with tf.Graph().as_default(), tf.Session(
             config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))) as sess:
         # Compute content features in feed-forward mode
-        content_image = tf.placeholder('float', shape=shape, name='content_image')
+        content_image = tf.placeholder(tf.uint8, shape=shape, name='content_image')
+        content_image_float = tf.image.convert_image_dtype(content_image, dtype=tf.float32) * 2 - 1
 
         with tf.variable_scope("discriminator", reuse=False):
-            net = vgg.net(content_image, trainable=False)
+            net = vgg.net(content_image_float, trainable=False)
         content_features[CONTENT_LAYER] = net[CONTENT_LAYER]
         net_layer_sizes = vgg.get_net_layer_sizes(net)
 
         if content is not None:
             # content_pre = np.array([vgg.preprocess(content, mean_pixel)])
             content_pre = np.array([content])
+            content_pre = content_pre.astype(dtype=np.uint8)
 
         # Compute style features in feed-forward mode.
         if content_img_style_weight_mask is not None:
@@ -142,9 +144,15 @@ def stylize(network, content, styles, shape, iterations, save_dir, content_weigh
             # initial = np.array([vgg.preprocess(initial, mean_pixel)])
             initial = np.array([initial])
             initial = initial.astype('float32')
-        image = tf.Variable(initial)
+        # image = tf.Variable(initial)
+        # image_uint8 = tf.cast(image, tf.uint8)
+        # image_float = tf.image.convert_image_dtype(image_uint8,dtype=tf.float32) * 2 - 1
+
+        image_float = tf.Variable(initial)
+        image = tf.image.convert_image_dtype((image_float + 1) / 2,dtype=tf.uint8)
+
         with tf.variable_scope("discriminator", reuse=True):
-            net= vgg.net(image, trainable=False)
+            net= vgg.net(image_float, trainable=False)
 
         # content loss
         _, height, width, number = map(lambda i: i.value, content_features[CONTENT_LAYER].get_shape())
@@ -182,7 +190,7 @@ def stylize(network, content, styles, shape, iterations, save_dir, content_weigh
                         gram - style_gram) / style_gram_size)  # TODO: Check normalization constants. the style loss is way too big compared to the other two.
             style_loss += style_weight * style_blend_weights[i] * reduce(tf.add, style_losses)
         # total variation denoising
-        tv_loss = tf.mul(neural_util.total_variation(image), tv_weight)
+        tv_loss = tf.mul(neural_util.total_variation(image_float), tv_weight)
 
         # overall loss
         if content is None:  # If we are doing style/texture regeration only.
@@ -252,6 +260,8 @@ def stylize(network, content, styles, shape, iterations, save_dir, content_weigh
                 #     vgg.unprocess(best.reshape(shape[1:]), mean_pixel)
                 # )
                 print(best)
+                best_float32 = image_float.eval()
+                print(best_float32)
                 yield (
                     (None if last_step else i),
                     best.reshape(shape[1:])
@@ -285,9 +295,11 @@ def _precompute_image_features(img, layers, shape, save_dir):
     # an effect on the training speed later since the gram matrix size is not related to the size of the image.
     with g.as_default(), g.device('/cpu:0'), tf.Session() as sess:
         with tf.variable_scope("discriminator", reuse=False):
-            image = tf.placeholder('float', shape=shape)
-            net = vgg.net(image, trainable=False)
+            image = tf.placeholder(tf.uint8, shape=shape)
+            image_float = tf.image.convert_image_dtype(image,dtype=tf.float32) * 2 - 1
+            net = vgg.net(image_float, trainable=False)
             style_pre = np.array([img])
+            style_pre = style_pre.astype(np.uint8)
 
             if '0.12.0' in tf.__version__:
                 all_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
