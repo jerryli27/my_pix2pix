@@ -49,6 +49,7 @@ parser.add_argument("--lr", type=float, default=0.0002, help="initial learning r
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
 parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
+parser.add_argument("--gpu_percentage", type=float, default=1.0, help="weight on GAN term for generator gradient")
 a = parser.parse_args()
 
 EPS = 1e-12
@@ -631,7 +632,9 @@ def main():
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
-    with sv.managed_session() as sess:
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = a.gpu_percentage
+    with sv.managed_session(config=config) as sess:
         print("parameter_count =", sess.run(parameter_count))
 
         if a.checkpoint is not None:
