@@ -297,32 +297,37 @@ def load_examples():
 
     def append_hint(inputs, targets):
         num_hints = 40
-        blank_hint = np.zeros(targets.get_shape().as_list()[:-1] + [4], dtype=np.float32)
-        # blank_hint = np.ones(targets.get_shape().as_list()[:-1] + [3], dtype=np.float32) * (-8)
+        # blank_hint = np.zeros(targets.get_shape().as_list()[:-1] + [4], dtype=np.float32)
+        blank_hint = np.ones(targets.get_shape().as_list()[:-1] + [3], dtype=np.float32)
         output = tf.get_variable('output', initializer=blank_hint, dtype=tf.float32, trainable=False)
 
         rd_indices_h = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-3], dtype=tf.int32)
         rd_indices_w = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-2], dtype=tf.int32)
         rd_indices_2d = tf.concat(1,(rd_indices_h,rd_indices_w))
-        # RGBA did not work.
-        rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
-        rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
-        rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
-        rd_indices_a = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 3)))
-        rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b, rd_indices_a))
-        assert rd_indices.get_shape().as_list()[0] == 40 * 4 and rd_indices.get_shape().as_list()[1] == 3
-        # RGB
+        # # RGBA did not work.
         # rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
         # rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
         # rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
-        # rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b))
+        # rd_indices_a = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 3)))
+        # rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b, rd_indices_a))
+        # assert rd_indices.get_shape().as_list()[0] == 40 * 4 and rd_indices.get_shape().as_list()[1] == 3 and len(targets.get_shape().as_list()) == 3
+        # RGB
+        rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
+        rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
+        rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
+        rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b))
+        assert rd_indices.get_shape().as_list()[0] == 40 * 3 and rd_indices.get_shape().as_list()[1] == 3 and len(
+            targets.get_shape().as_list()) == 3
 
-        targets_rgba = tf.concat(2,(targets,np.ones(targets.get_shape().as_list()[:-1] + [1])))
-        hints = tf.gather_nd(targets_rgba, rd_indices)
-        # hints = tf.gather_nd(targets, rd_indices)
+
+        # targets_rgba = tf.concat(2,(targets,np.ones(targets.get_shape().as_list()[:-1] + [1])))
+        # hints = tf.gather_nd(targets_rgba, rd_indices)
+
+        hints = tf.gather_nd(targets, rd_indices)
         clear_hint_op = tf.assign(output, blank_hint)
         with tf.control_dependencies([clear_hint_op]):
             update_hint_op = tf.scatter_nd_update(output, rd_indices, hints)
+        # update_hint_op = tf.scatter_nd_update(output, rd_indices, hints)
         assert len(update_hint_op.get_shape().as_list()) == 3
 
         # Not exactly the same as the hints in chainer, so I put the code in chainer here for reference
@@ -341,6 +346,7 @@ def load_examples():
         #         hints[x[i] - 1][y[i]][ch] = target[x[i]][y[i]][ch]
 
         return tf.concat(2, (inputs, output), name='input_concat'), update_hint_op
+        # return tf.concat(2, (inputs, output), name='input_concat'), output
 
     with tf.name_scope("target_images"):
         target_images = transform(targets)
@@ -351,7 +357,10 @@ def load_examples():
             input_images, input_hints = append_hint(input_images, target_images)
 
 
-    paths, inputs, targets = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
+    if a.use_hint:
+        paths, inputs, targets, input_hints = tf.train.batch([paths, input_images, target_images, input_hints], batch_size=a.batch_size)
+    else:
+        paths, inputs, targets = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
 
     return Examples(
@@ -489,13 +498,7 @@ def create_model(inputs, targets):
 
     with tf.variable_scope("generator") as scope:
         out_channels = int(targets.get_shape()[-1])
-        if a.use_hint:
-            print("creating generator without hint")
-            print(inputs[...,:-4].get_shape().as_list())
-            outputs = create_generator(inputs[...,:-4], out_channels)
-        else:
-            outputs = create_generator(inputs, out_channels)
-        # outputs = create_generator(inputs, out_channels) #TODO: change back later
+        outputs = create_generator(inputs, out_channels)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -503,9 +506,9 @@ def create_model(inputs, targets):
         with tf.variable_scope("discriminator"):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
             if a.use_hint:
-                print("creating discr without hint")
-                print(inputs[...,:-4].get_shape().as_list())
-                predict_real = create_discriminator(inputs[...,:-4], targets)
+                print("creating discr without hint. FOR NOW")
+                print(inputs[...,:1].get_shape().as_list())
+                predict_real = create_discriminator(inputs[...,:1], targets)
             else:
                 predict_real = create_discriminator(inputs, targets)
                 # TODO: change back later
@@ -515,9 +518,9 @@ def create_model(inputs, targets):
         with tf.variable_scope("discriminator", reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
             if a.use_hint:
-                print("creating discr without hint")
-                print(inputs[...,:-4].get_shape().as_list())
-                predict_fake = create_discriminator(inputs[...,:-4], outputs)
+                print("creating discr without hint. FOR NOW")
+                print(inputs[...,:1].get_shape().as_list())
+                predict_fake = create_discriminator(inputs[...,:1], outputs)
             else:
                 predict_fake = create_discriminator(inputs, outputs)
                 # TODO: change back later
@@ -534,8 +537,7 @@ def create_model(inputs, targets):
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight #TODO: change it back
-        # gen_loss = gen_loss_L1 * a.l1_weight
+        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
@@ -547,10 +549,6 @@ def create_model(inputs, targets):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
             gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
             gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
-        # TODO: change it back
-        # gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
-        # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-        # gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
@@ -683,7 +681,7 @@ def main():
     # reverse any processing on images so they can be written to disk or displayed to user
     with tf.name_scope("deprocess_inputs"):
         if a.use_hint:
-            deprocessed_inputs = deprocess(examples.inputs[...,:-4])
+            deprocessed_inputs = deprocess(examples.inputs[...,:1])
         else:
             deprocessed_inputs = deprocess(examples.inputs)
 
