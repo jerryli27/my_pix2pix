@@ -37,6 +37,7 @@ parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect rati
 parser.add_argument("--lab_colorization", action="store_true", help="split A image into brightness (A) and color (B), ignore B image")
 parser.add_argument("--gray_input_a", action="store_true", help="Treat A image as grayscale image.")
 parser.add_argument("--gray_input_b", action="store_true", help="Treat B image as grayscale image.")
+parser.add_argument("--use_hint", action="store_true", help="Supply hints to input. Training dimension 1 -> 4.")
 parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
 parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
@@ -52,10 +53,12 @@ parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN
 parser.add_argument("--gpu_percentage", type=float, default=1.0, help="weight on GAN term for generator gradient")
 a = parser.parse_args()
 
+assert a.use_hint
+
 EPS = 1e-12
 CROP_SIZE = 256
 
-Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
+Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, train")
 
 
@@ -291,11 +294,59 @@ def load_examples():
             raise Exception("scale size cannot be less than crop size")
         return r
 
-    with tf.name_scope("input_images"):
-        input_images = transform(inputs)
+    def append_hint(inputs, targets):
+        num_hints = 40
+        blank_hint = np.zeros(targets.get_shape().as_list()[:-1] + [4], dtype=np.float32)
+        # blank_hint = np.ones(targets.get_shape().as_list()[:-1] + [3], dtype=np.float32) * (-8)
+        output = tf.get_variable('output', initializer=blank_hint, dtype=tf.float32, trainable=False)
+
+        rd_indices_h = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-3], dtype=tf.int32)
+        rd_indices_w = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-2], dtype=tf.int32)
+        rd_indices_2d = tf.concat(1,(rd_indices_h,rd_indices_w))
+        # RGBA did not work.
+        rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
+        rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
+        rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
+        rd_indices_a = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 3)))
+        rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b, rd_indices_a))
+        # RGB
+        # rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
+        # rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
+        # rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
+        # rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b))
+
+        targets_rgba = tf.concat(2,(targets,np.ones(targets.get_shape().as_list()[:-1] + [1])))
+        hints = tf.gather_nd(targets_rgba, rd_indices)
+        # hints = tf.gather_nd(targets, rd_indices)
+        clear_hint_op = tf.assign(output, blank_hint)
+        with tf.control_dependencies([clear_hint_op]):
+            update_hint_op = tf.scatter_nd_update(output, rd_indices, hints)
+
+        # Not exactly the same as the hints in chainer, so I put the code in chainer here for reference
+        # for ch in xrange(3):
+        #     d = 20
+        #     v = target[x[i]][y[i]][ch] + np.random.normal(0, 5)
+        #     v = np.floor(v / d + 0.5) * d
+        #     hints[x[i]][y[i]][ch] = v
+        # if np.random.rand() > 0.5:
+        #     for ch in xrange(3):
+        #         hints[x[i]][y[i] + 1][ch] = target[x[i]][y[i]][ch]
+        #         hints[x[i]][y[i] - 1][ch] = target[x[i]][y[i]][ch]
+        # if np.random.rand() > 0.5:
+        #     for ch in xrange(3):
+        #         hints[x[i] + 1][y[i]][ch] = target[x[i]][y[i]][ch]
+        #         hints[x[i] - 1][y[i]][ch] = target[x[i]][y[i]][ch]
+
+        return tf.concat(2, (inputs, output), name='input_concat'), update_hint_op
 
     with tf.name_scope("target_images"):
         target_images = transform(targets)
+    with tf.name_scope("input_images"):
+        input_images = transform(inputs)
+        if a.use_hint:
+            # TODO: change it so that the input can also include hint for testing mode.
+            input_images, input_hints = append_hint(input_images, target_images)
+
 
     paths, inputs, targets = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
@@ -306,6 +357,7 @@ def load_examples():
         targets=targets,
         count=len(input_paths),
         steps_per_epoch=steps_per_epoch,
+        input_hints=input_hints if a.use_hint else None,
     )
 
 
@@ -416,7 +468,12 @@ def create_model(inputs, targets):
 
     with tf.variable_scope("generator") as scope:
         out_channels = int(targets.get_shape()[-1])
-        outputs = create_generator(inputs, out_channels)
+        # if a.use_hint:
+        #     outputs = create_generator(inputs[...,:-4], out_channels)
+        #     print(inputs[...,:-4].get_shape().as_list())
+        # else:
+        #     outputs = create_generator(inputs, out_channels)
+        outputs = create_generator(inputs, out_channels) #TODO: change back later
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -441,7 +498,8 @@ def create_model(inputs, targets):
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight #TODO: change it back
+        # gen_loss = gen_loss_L1 * a.l1_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
@@ -453,6 +511,10 @@ def create_model(inputs, targets):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
             gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
             gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+        # TODO: change it back
+        # gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
+        # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        # gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
@@ -512,7 +574,6 @@ def append_index(filesets, step=False):
         index.write("</tr>")
     return index_path
 
-
 def main():
     if a.seed is None:
         a.seed = random.randint(0, 2**31 - 1)
@@ -529,7 +590,7 @@ def main():
             raise Exception("checkpoint required for test mode")
 
         # load some options from the checkpoint
-        options = {"which_direction", "ngf", "ndf", "lab_colorization", "gray_input_a", "gray_input_b"}
+        options = {"which_direction", "ngf", "ndf", "lab_colorization", "gray_input_a", "gray_input_b", "use_hint"}
         with open(os.path.join(a.checkpoint, "options.json")) as f:
             for key, val in json.loads(f.read()).iteritems():
                 if key in options:
@@ -585,7 +646,11 @@ def main():
 
     # reverse any processing on images so they can be written to disk or displayed to user
     with tf.name_scope("deprocess_inputs"):
-        deprocessed_inputs = deprocess(examples.inputs)
+        if a.use_hint:
+            deprocessed_inputs = deprocess(examples.inputs[...,:-4])
+        else:
+            deprocessed_inputs = deprocess(examples.inputs)
+
 
     with tf.name_scope("deprocess_targets"):
         deprocessed_targets = deprocess(examples.targets)
@@ -688,6 +753,9 @@ def main():
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
 
+                if a.use_hint:
+                    fetches["update_hint"] = examples.input_hints
+
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
 
                 if should(a.summary_freq):
@@ -728,24 +796,15 @@ python pix2pix.py --mode test --output_dir facades_test --input_dir facades/val 
 
 
 """
---mode
-train
---output_dir
-sanity_check_train
---max_epochs
-200
---input_dir
-/home/xor/pixiv_images/test_images_sketches_combined
---which_direction
-AtoB
+--mode train --output_dir sanity_check_train --max_epochs 200 --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --display_freq=5 --use_hint
+--mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
 """
-python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45
+python pix2pix_w_hint.py --mode train --output_dir pixiv_full_128_w_hint_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
+python pix2pix_w_hint.py --mode train --output_dir pixiv_full_128_w_hint_tiny --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=50 --save_freq=500 --gray_input_a --use_hint --batch_size 1 --gpu_percentage 0.45
 """
 
 """
-python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
-python pix2pix.py --mode test --output_dir pixiv_full_128_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_tiny --gpu_percentage 0.45
+python pix2pix_w_hint.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
+python pix2pix_w_hint.py --mode test --output_dir pixiv_full_128_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_tiny --gpu_percentage 0.45
 """
