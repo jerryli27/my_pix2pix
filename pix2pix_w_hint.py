@@ -42,7 +42,8 @@ parser.add_argument("--batch_size", type=int, default=1, help="number of images 
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
 parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
-parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+parser.add_argument("--scale_size", type=int, default= 143,# 286,
+                    help="scale images to this size before cropping to `CROP_SIZE`x`CROP_SIZE`")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
 parser.set_defaults(flip=True)
@@ -56,7 +57,7 @@ a = parser.parse_args()
 assert a.use_hint
 
 EPS = 1e-12
-CROP_SIZE = 256
+CROP_SIZE = 128 # 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, train")
@@ -309,6 +310,7 @@ def load_examples():
         rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
         rd_indices_a = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 3)))
         rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b, rd_indices_a))
+        assert rd_indices.get_shape().as_list()[0] == 40 * 4 and rd_indices.get_shape().as_list()[1] == 3
         # RGB
         # rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
         # rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
@@ -321,6 +323,7 @@ def load_examples():
         clear_hint_op = tf.assign(output, blank_hint)
         with tf.control_dependencies([clear_hint_op]):
             update_hint_op = tf.scatter_nd_update(output, rd_indices, hints)
+        assert len(update_hint_op.get_shape().as_list()) == 3
 
         # Not exactly the same as the hints in chainer, so I put the code in chainer here for reference
         # for ch in xrange(3):
@@ -369,16 +372,25 @@ def create_model(inputs, targets):
         with tf.variable_scope("encoder_1"):
             output = conv(generator_inputs, a.ngf, stride=2)
             layers.append(output)
-
-        layer_specs = [
-            a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-            a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-            a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-            a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-            a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-            a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-            a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
-        ]
+        if CROP_SIZE == 128:
+            layer_specs = [
+                a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
+                a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
+                a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
+                a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+                a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+                a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+            ]
+        else:
+            layer_specs = [
+                a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
+                a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
+                a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
+                a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+                a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+                a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+                a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
+            ]
 
         for out_channels in layer_specs:
             with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
@@ -388,16 +400,25 @@ def create_model(inputs, targets):
                 output = batchnorm(convolved)
                 layers.append(output)
 
-        layer_specs = [
-            (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-            (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-            (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-            (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-            (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-            (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-            (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-        ]
-
+        if CROP_SIZE == 128:
+            layer_specs = [
+                (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+                (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+                (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+                (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+                (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+                (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+            ]
+        else:
+            layer_specs = [
+                (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
+                (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+                (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+                (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+                (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+                (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+                (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+            ]
         num_encoder_layers = len(layers)
         for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
             skip_layer = num_encoder_layers - decoder_layer - 1
@@ -468,24 +489,39 @@ def create_model(inputs, targets):
 
     with tf.variable_scope("generator") as scope:
         out_channels = int(targets.get_shape()[-1])
-        # if a.use_hint:
-        #     outputs = create_generator(inputs[...,:-4], out_channels)
-        #     print(inputs[...,:-4].get_shape().as_list())
-        # else:
-        #     outputs = create_generator(inputs, out_channels)
-        outputs = create_generator(inputs, out_channels) #TODO: change back later
+        if a.use_hint:
+            print("creating generator without hint")
+            print(inputs[...,:-4].get_shape().as_list())
+            outputs = create_generator(inputs[...,:-4], out_channels)
+        else:
+            outputs = create_generator(inputs, out_channels)
+        # outputs = create_generator(inputs, out_channels) #TODO: change back later
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
     with tf.name_scope("real_discriminator"):
         with tf.variable_scope("discriminator"):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real = create_discriminator(inputs, targets)
+            if a.use_hint:
+                print("creating discr without hint")
+                print(inputs[...,:-4].get_shape().as_list())
+                predict_real = create_discriminator(inputs[...,:-4], targets)
+            else:
+                predict_real = create_discriminator(inputs, targets)
+                # TODO: change back later
+            # predict_real = create_discriminator(inputs, targets)
 
     with tf.name_scope("fake_discriminator"):
         with tf.variable_scope("discriminator", reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake = create_discriminator(inputs, outputs)
+            if a.use_hint:
+                print("creating discr without hint")
+                print(inputs[...,:-4].get_shape().as_list())
+                predict_fake = create_discriminator(inputs[...,:-4], outputs)
+            else:
+                predict_fake = create_discriminator(inputs, outputs)
+                # TODO: change back later
+            # predict_fake = create_discriminator(inputs, outputs)
 
     with tf.name_scope("discriminator_loss"):
         # minimizing -tf.log will try to get inputs to 1

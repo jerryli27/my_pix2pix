@@ -41,7 +41,8 @@ parser.add_argument("--batch_size", type=int, default=1, help="number of images 
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
 parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
-parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+parser.add_argument("--scale_size", type=int, default= 143,# 286,
+                    help="scale images to this size before cropping to `CROP_SIZE`x`CROP_SIZE`")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
 parser.set_defaults(flip=True)
@@ -53,7 +54,7 @@ parser.add_argument("--gpu_percentage", type=float, default=1.0, help="weight on
 a = parser.parse_args()
 
 EPS = 1e-12
-CROP_SIZE = 256
+CROP_SIZE = 128 # 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, train")
@@ -388,7 +389,7 @@ def create_model(inputs, targets):
             input = tf.concat(3,[layers[-1], layers[0]])
             rectified = tf.nn.relu(input)
             output = deconv(rectified, generator_outputs_channels, 1, 3)
-            output = tf.tanh(output)
+            output = (tf.tanh(output) + 1.0) / 2
             layers.append(output)
 
         return layers[-1]
@@ -444,7 +445,9 @@ def create_model(inputs, targets):
             # With WGAN, sigmoid for the last layer is no longer needed
             normed = batchnorm(layers[-1])
             convolved = conv(normed, out_channels=1, stride=1, shift=3)
-            layers.append(convolved)
+            output = tf.sigmoid(convolved)
+            layers.append(output)
+            # layers.append(convolved)
 
         return layers[-1]
 
@@ -774,11 +777,12 @@ sanity_check_train
 AtoB
 """
 """
-python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45
+python pix2pix_large.py --mode train --output_dir pixiv_full_128_large_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
+python pix2pix_large.py --mode train --output_dir pixiv_full_128_large_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45
+python pix2pix_large.py --mode train --output_dir pixiv_full_128_large_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45
 """
 
 """
-python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
-python pix2pix.py --mode test --output_dir pixiv_full_128_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_tiny --gpu_percentage 0.45
+python pix2pix_large.py --mode test --output_dir pixiv_full_128_large_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_large_train
+python pix2pix_large.py --mode test --output_dir pixiv_full_128_large_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_large_tiny --gpu_percentage 0.45
 """
