@@ -242,27 +242,37 @@ def load_examples():
 
         raw_input.set_shape([None, None, 3])
 
+        # break apart image pair and move to range [-1, 1]
+        width = tf.shape(raw_input)[1]  # [height, width, channels]
+
+        # a_images = raw_input[:,:width//2,:] * 2 - 1
+        # b_images = raw_input[:,width//2:,:] * 2 - 1
+
+        # Modified code: change a_images and b_images to 0~1 before turning into grayscale and rescaling.
+        a_images = raw_input[:, :width // 2, :]
+        b_images = raw_input[:, width // 2:, :]
+        if a.gray_input_a:
+            a_images = tf.image.rgb_to_grayscale(a_images)
+        if a.gray_input_b:
+            b_images = tf.image.rgb_to_grayscale(b_images)
+
         if a.lab_colorization:
-            # load color and brightness from image, no B image exists here
-            lab = rgb_to_lab(raw_input)
+            if a.which_direction=="AtoB":
+                lab = rgb_to_lab(b_images)
+            else:
+                lab = rgb_to_lab(a_images)
             L_chan, a_chan, b_chan = tf.unstack(lab, axis=2)
-            a_images = tf.expand_dims(L_chan, axis=2) / 50 - 1 # black and white with input range [0, 100]
-            b_images = tf.stack([a_chan, b_chan], axis=2) / 110 # color channels with input range ~[-110, 110], not exact
+
+            L_chan = tf.expand_dims(L_chan, axis=2) / 50 - 1 # black and white with input range [0, 100]
+            ab_chan = tf.stack([a_chan, b_chan], axis=2) / 110 # color channels with input range ~[-110, 110], not exact
+
+            if a.which_direction=="AtoB":
+                b_images = tf.concat(2,[L_chan, ab_chan])
+                a_images =  a_images * 2 - 1
+            else:
+                a_images = tf.concat(2,[L_chan, ab_chan])
+                b_images = b_images * 2 - 1
         else:
-            # break apart image pair and move to range [-1, 1]
-            width = tf.shape(raw_input)[1] # [height, width, channels]
-
-            # a_images = raw_input[:,:width//2,:] * 2 - 1
-            # b_images = raw_input[:,width//2:,:] * 2 - 1
-
-            # Modified code: change a_images and b_images to 0~1 before turning into grayscale and rescaling.
-            a_images = raw_input[:,:width//2,:]
-            b_images = raw_input[:,width//2:,:]
-            if a.gray_input_a:
-                a_images = tf.image.rgb_to_grayscale(a_images)
-            if a.gray_input_b:
-                b_images = tf.image.rgb_to_grayscale(b_images)
-
             a_images =  a_images * 2 - 1
             b_images = b_images * 2 - 1
 
@@ -535,6 +545,7 @@ def append_index(filesets, step=False):
 
 
 def main():
+    assert a.lab_colorization is True
     if a.seed is None:
         a.seed = random.randint(0, 2**31 - 1)
 
@@ -583,19 +594,14 @@ def main():
             num_channels = int(image.get_shape()[-1])
             if num_channels == 1:
                 return tf.image.convert_image_dtype((image + 1) / 2, dtype=tf.uint8, saturate=True)
-            elif num_channels == 2:
+            elif num_channels == 3:
                 # (a, b) color channels, convert to rgb
                 # a_chan and b_chan have range [-1, 1] => [-110, 110]
-                a_chan, b_chan = tf.unstack(image * 110, axis=3)
-                # get L_chan from inputs or targets
-                if a.which_direction == "AtoB":
-                    brightness = examples.inputs
-                elif a.which_direction == "BtoA":
-                    brightness = examples.targets
-                else:
-                    raise Exception("invalid direction")
-                # L_chan has range [-1, 1] => [0, 100]
-                L_chan = tf.squeeze((brightness + 1) / 2 * 100, axis=3)
+                L_chan, a_chan, b_chan = tf.unstack(image, axis=3)
+                L_chan = (L_chan + 1) * 50
+                a_chan = a_chan * 110
+                b_chan = b_chan * 110
+
                 lab = tf.stack([L_chan, a_chan, b_chan], axis=3)
                 rgb = lab_to_rgb(lab)
                 return tf.image.convert_image_dtype(rgb, dtype=tf.uint8, saturate=True)
@@ -742,9 +748,9 @@ main()
 """--input_dir=/home/xor/pixiv_images/test_images_sketches/line/ --b_dir=/home/xor/pixiv_images/test_images_sketches/color/ --operation=combine --output_dir=/home/xor/pixiv_images/test_images_sketches_combined/"""
 """
 # train the model (this may take 1-8 hours depending on GPU, on CPU you will be waiting for a bit)
-python pix2pix.py --mode train --output_dir facades_train --max_epochs 200 --input_dir facades/train --which_direction BtoA --display_freq=5000
+python pix2pix_lab.py --mode train --output_dir facades_train --max_epochs 200 --input_dir facades/train --which_direction BtoA --display_freq=5000
 # test the model
-python pix2pix.py --mode test --output_dir facades_test --input_dir facades/val --checkpoint facades_train
+python pix2pix_lab.py --mode test --output_dir facades_test --input_dir facades/val --checkpoint facades_train
 """
 
 
@@ -761,12 +767,12 @@ sanity_check_train
 AtoB
 """
 """
-python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45
+python pix2pix_lab.py --mode train --output_dir pixiv_full_128_lab_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --lab_colorization
+python pix2pix_lab.py --mode train --output_dir pixiv_full_128_lab_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45 --lab_colorization
+python pix2pix_lab.py --mode train --output_dir pixiv_full_128_lab_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45 --lab_colorization
 """
 
 """
-python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
-python pix2pix.py --mode test --output_dir pixiv_full_128_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_tiny --gpu_percentage 0.45
+python pix2pix_lab.py --mode test --output_dir pixiv_full_128_lab_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_lab_lab_train --lab_colorization
+python pix2pix_lab.py --mode test --output_dir pixiv_full_128_lab_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_lab_tiny --gpu_percentage 0.45 --lab_colorization
 """

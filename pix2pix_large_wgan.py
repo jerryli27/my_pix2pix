@@ -50,23 +50,27 @@ parser.add_argument("--lr", type=float, default=0.0002, help="initial learning r
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
 parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
-parser.add_argument("--gpu_percentage", type=float, default=1.0, help="TODO")
+parser.add_argument("--gpu_percentage", type=float, default=1.0, help="weight on GAN term for generator gradient")
 a = parser.parse_args()
 
 EPS = 1e-12
 CROP_SIZE = 128 # 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, discrim_train, train")
 
 
-def conv(batch_input, out_channels, stride):
+def conv(batch_input, out_channels, stride, shift, pad = 1):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
-        filter = tf.get_variable("filter", [4, 4, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
+        filter = tf.get_variable("filter", [shift, shift, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
-        padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
+        if pad > 0:
+            padded_input = tf.pad(batch_input, [[0, 0], [pad, pad], [pad, pad], [0, 0]], mode="CONSTANT")
+        else:
+            assert pad == 0
+            padded_input = batch_input
         conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
         return conv
 
@@ -97,13 +101,13 @@ def batchnorm(input):
         return normalized
 
 
-def deconv(batch_input, out_channels):
+def deconv(batch_input, out_channels, stride, shift):
     with tf.variable_scope("deconv"):
         batch, in_height, in_width, in_channels = [int(d) for d in batch_input.get_shape()]
-        filter = tf.get_variable("filter", [4, 4, out_channels, in_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
+        filter = tf.get_variable("filter", [shift, shift, out_channels, in_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, out_channels, in_channels]
         #     => [batch, out_height, out_width, out_channels]
-        conv = tf.nn.conv2d_transpose(batch_input, filter, [batch, in_height * 2, in_width * 2, out_channels], [1, 2, 2, 1], padding="SAME")
+        conv = tf.nn.conv2d_transpose(batch_input, filter, [batch, in_height * stride, in_width * stride, out_channels], [1, stride, stride, 1], padding="SAME")
         return conv
 
 
@@ -314,75 +318,64 @@ def create_model(inputs, targets):
     def create_generator(generator_inputs, generator_outputs_channels):
         layers = []
 
-        # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+        # encoder_1: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
         with tf.variable_scope("encoder_1"):
-            output = conv(generator_inputs, a.ngf, stride=2)
+            output = conv(generator_inputs, a.ngf, stride=1, shift=3)
             layers.append(output)
 
-        if CROP_SIZE == 128:
-            layer_specs = [
-                a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-                a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-                a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-                a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-                a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-                a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-            ]
-        else:
-            layer_specs = [
-                a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-                a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-                a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-                a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-                a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-                a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-                a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
-            ]
+        layer_specs = [
+            a.ngf * 2, # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
+            a.ngf * 2, # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
+            a.ngf * 4, # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
+            a.ngf * 4, # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
+            a.ngf * 8, # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ngf * 8, # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
+            a.ngf * 16, # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
+            a.ngf * 16, # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
+        ]
 
         for out_channels in layer_specs:
             with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
                 rectified = lrelu(layers[-1], 0.2)
-                # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                convolved = conv(rectified, out_channels, stride=2)
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(rectified, out_channels, stride=2, shift=4)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(rectified, out_channels, stride=1, shift=3)
                 output = batchnorm(convolved)
                 layers.append(output)
 
-        if CROP_SIZE == 128:
-            layer_specs = [
-                (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-                (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-                (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-                (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-                (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-                (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-            ]
-        else:
-            layer_specs = [
-                (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-                (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-                (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-                (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-                (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-                (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-                (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-            ]
+        layer_specs = [
+            (a.ngf * 16, 0.5),   # decoder_8: [batch, 16, 16, ngf * 16 * 2]=> [batch, 32, 32, ngf * 16]
+            (a.ngf * 8, 0.5),   # decoder_7: [batch, 32, 32, ngf * 16] => [batch, 32, 32, ngf * 8]
+            (a.ngf * 8, 0.5),   # decoder_6: [batch, 32, 32, ngf * 8 * 2] => [batch, 64, 64, ngf * 8]
+            (a.ngf * 4, 0.0),   # decoder_5: [batch, 64, 64, ngf * 8] => [batch, 64, 64, ngf * 4]
+            (a.ngf * 4, 0.0),   # decoder_4: [batch, 64, 64, ngf * 4 * 2] => [batch, 128, 128, ngf * 4]
+            (a.ngf * 2, 0.0),   # decoder_3: [batch, 128, 128, ngf * 4] => [batch, 128, 128, ngf * 2]
+            (a.ngf * 2, 0.0),       # decoder_2: [batch, 128, 128, ngf * 2 * 2] => [batch, 256, 256, ngf * 2]
+            (a.ngf * 1, 0.0),                 # decoder_1: [batch, 256, 256, ngf * 2] => [batch, 256, 256, ngf]
+        ]
 
         num_encoder_layers = len(layers)
         for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
             skip_layer = num_encoder_layers - decoder_layer - 1
             with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-                if decoder_layer == 0:
+                if decoder_layer % 2 != 0:
                     # first decoder layer doesn't have skip connections
                     # since it is directly connected to the skip_layer
                     input = layers[-1]
+                    rectified = tf.nn.relu(input)
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    output = deconv(rectified, out_channels, 1, 3)
                 else:
                     # Can't find concat_v2 so commenting this out.
                     #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
                     input = tf.concat(3, [layers[-1], layers[skip_layer]])
 
-                rectified = tf.nn.relu(input)
-                # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-                output = deconv(rectified, out_channels)
+                    rectified = tf.nn.relu(input)
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                    output = deconv(rectified, out_channels, 2, 4)
                 output = batchnorm(output)
 
                 if dropout > 0.0:
@@ -395,8 +388,8 @@ def create_model(inputs, targets):
             #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
             input = tf.concat(3,[layers[-1], layers[0]])
             rectified = tf.nn.relu(input)
-            output = deconv(rectified, generator_outputs_channels)
-            output = tf.tanh(output)
+            output = deconv(rectified, generator_outputs_channels, 1, 3)
+            output = (tf.tanh(output) + 1.0) / 2
             layers.append(output)
 
         return layers[-1]
@@ -411,27 +404,50 @@ def create_model(inputs, targets):
 
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
-            convolved = conv(input, a.ndf, stride=2)
+            convolved = conv(input, a.ndf, stride=1, shift = 3)
             rectified = lrelu(convolved, 0.2)
             layers.append(rectified)
 
         # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
         # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
         # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
-        for i in range(n_layers):
+
+        layer_specs = [
+            a.ndf * 2,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
+            a.ndf * 2,  # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
+            a.ndf * 4,  # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
+            a.ndf * 4,  # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
+            a.ndf * 8,  # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ndf * 8,  # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
+            a.ndf * 16,  # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
+            a.ndf * 16,  # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
+        ]
+
+        for out_channels in layer_specs:
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-                out_channels = a.ndf * min(2**(i+1), 8)
-                stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
-                convolved = conv(layers[-1], out_channels, stride=stride)
-                normalized = batchnorm(convolved)
-                rectified = lrelu(normalized, 0.2)
+                normed = batchnorm(layers[-1])
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(normed, out_channels, stride=2, shift=4)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(normed, out_channels, stride=1, shift=3)
+
+                rectified = lrelu(convolved, 0.2)
                 layers.append(rectified)
 
         # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-            convolved = conv(rectified, out_channels=1, stride=1)
-            output = tf.sigmoid(convolved)
-            layers.append(output)
+            # convolved = conv(rectified, out_channels=1, stride=1)
+            # output = tf.sigmoid(convolved)
+            # layers.append(output)
+
+            # With WGAN, sigmoid for the last layer is no longer needed
+            normed = batchnorm(layers[-1])
+            convolved = conv(normed, out_channels=1, stride=1, shift=3)
+            # output = tf.sigmoid(convolved)
+            # layers.append(output)
+            layers.append(convolved)
 
         return layers[-1]
 
@@ -452,27 +468,45 @@ def create_model(inputs, targets):
             predict_fake = create_discriminator(inputs, outputs)
 
     with tf.name_scope("discriminator_loss"):
-        # minimizing -tf.log will try to get inputs to 1
-        # predict_real => 1
-        # predict_fake => 0
-        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
+        # # minimizing -tf.log will try to get inputs to 1
+        # # predict_real => 1
+        # # predict_fake => 0
+        # discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
+
+        # Use wgan loss
+        discrim_loss = -tf.reduce_mean(predict_real) + tf.reduce_mean(predict_fake)
 
     with tf.name_scope("generator_loss"):
-        # predict_fake => 1
-        # abs(targets - outputs) => 0
-        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+        # # predict_fake => 1
+        # # abs(targets - outputs) => 0
+        # gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+        # gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        # gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+
+        # WGAN loss
+        gen_loss_GAN = -tf.reduce_mean(predict_fake)
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
-        discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-        discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        #discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        # WGAN does not use momentum based optimizer
+        discrim_optim = tf.train.RMSPropOptimizer(a.lr)
+        # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+
+        # WGAN adds a clip and train discriminator 5 times
+        discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        discrim_clips = [var.assign(tf.clip_by_value(var, -0.01, 0.01)) for var in discrim_tvars]
+        # No difference between control dependencies and group.
+        with tf.control_dependencies([discrim_min] + discrim_clips):
+            discrim_train = tf.no_op(name='discrim_train')
 
     with tf.name_scope("generator_train"):
         with tf.control_dependencies([discrim_train]):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
-            gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            gen_optim = tf.train.RMSPropOptimizer(a.lr)
             gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
@@ -488,6 +522,7 @@ def create_model(inputs, targets):
         gen_loss_GAN=ema.average(gen_loss_GAN),
         gen_loss_L1=ema.average(gen_loss_L1),
         outputs=outputs,
+        discrim_train=tf.group(discrim_train),
         train=tf.group(update_losses, incr_global_step, gen_train),
     )
 
@@ -693,6 +728,11 @@ def main():
                     options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                     run_metadata = tf.RunMetadata()
 
+                discrim_train_fetches = {
+                    "discrim_train":model.discrim_train,
+                    "global_step": sv.global_step
+                }
+
                 fetches = {
                     "train": model.train,
                     "global_step": sv.global_step,
@@ -708,6 +748,9 @@ def main():
 
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
+
+                for _ in range(4):
+                    sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
 
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
 
@@ -761,12 +804,12 @@ sanity_check_train
 AtoB
 """
 """
-python pix2pix.py --mode train --output_dir pixiv_full_128_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45
-python pix2pix.py --mode train --output_dir pixiv_full_128_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45
+python pix2pix_large_wgan.py --mode train --output_dir pixiv_full_128_large_wgan_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
+python pix2pix_large_wgan.py --mode train --output_dir pixiv_full_128_large_wgan_sanity_check --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --gpu_percentage 0.45
+python pix2pix_large_wgan.py --mode train --output_dir pixiv_full_128_large_wgan_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45
 """
 
 """
-python pix2pix.py --mode test --output_dir pixiv_full_128_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_train
-python pix2pix.py --mode test --output_dir pixiv_full_128_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_tiny --gpu_percentage 0.45
+python pix2pix_large_wgan.py --mode test --output_dir pixiv_full_128_large_wgan_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_large_wgan_train
+python pix2pix_large_wgan.py --mode test --output_dir pixiv_full_128_large_wgan_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_large_wgan_tiny --gpu_percentage 0.45
 """

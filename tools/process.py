@@ -260,11 +260,13 @@ def main():
                 # a/sub/dir/1.jpg then b should have b/sub/dir/1.jpg
                 basename, _ = os.path.splitext(os.path.basename(src_path))
                 subdir_name = src_path[len(a.input_dir):]
-                sibling_path = os.path.join(a.b_dir, subdir_name)
+                # sibling_path = os.path.join(a.b_dir, subdir_name)
+                sibling_path = a.b_dir + subdir_name
                 if os.path.exists(sibling_path):
                     sibling = load(sibling_path)
                 else:
-                    raise Exception("could not find sibling image for " + src_path)
+                    raise Exception("could not find sibling image for " + src_path +
+                                    ". Sibling path: " + sibling_path +" does not exist under subdir_name " + subdir_name + " bdir=" + a.b_dir)
 
                 # make sure that dimensions are correct
                 height, width, _ = src.shape

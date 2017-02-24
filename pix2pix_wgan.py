@@ -50,6 +50,7 @@ parser.add_argument("--lr", type=float, default=0.0002, help="initial learning r
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
 parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
+parser.add_argument("--gpu_percentage", type=float, default=1.0, help="TODO")
 a = parser.parse_args()
 
 EPS = 1e-12
@@ -677,7 +678,9 @@ def main():
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
-    with sv.managed_session() as sess:
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = a.gpu_percentage
+    with sv.managed_session(config=config) as sess:
         print("parameter_count =", sess.run(parameter_count))
 
         if a.checkpoint is not None:
@@ -736,6 +739,7 @@ def main():
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
 
+                # Disabling this will result in discriminator failing to be good at its task.
                 for _ in range(4):
                     sess.run(discrim_train_fetches, options=options, run_metadata=run_metadata)
 
@@ -793,8 +797,10 @@ AtoB
 """
 python pix2pix_wgan_mod_dis.py --mode train --output_dir pixiv_full_128_train_wgan_mod_dis --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
 
-python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_train_wgan --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
-python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_train_wgan --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=5000 --gray_input_a --batch_size 1
+python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_wgan_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
+python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_wgan_only_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --l1_weight=0
+python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_wgan_train_tiny --max_epochs 200 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45
+python pix2pix_wgan.py --mode train --output_dir pixiv_full_128_wgan_only_train_tiny --max_epochs 500 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --gpu_percentage 0.45 --l1_weight=0
 """
 
 """
