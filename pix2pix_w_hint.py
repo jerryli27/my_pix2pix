@@ -59,8 +59,6 @@ parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN
 parser.add_argument("--gpu_percentage", type=float, default=1.0, help="weight on GAN term for generator gradient")
 a = parser.parse_args()
 
-assert a.use_hint
-
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
 

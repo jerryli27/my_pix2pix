@@ -64,8 +64,6 @@ parser.add_argument("--gpu_percentage", type=float, default=1.0, help="weight on
 parser.add_argument("--from_128", dest="from_128", action="store_true", help="Indicate whether model is from 128x128.")
 a = parser.parse_args()
 
-assert a.use_hint
-
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
 
@@ -317,28 +315,9 @@ def load_examples(user_hint = None):
             rd_indices_h = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-3], dtype=tf.int32)
             rd_indices_w = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-2], dtype=tf.int32)
             rd_indices_2d = tf.concat(1,(rd_indices_h,rd_indices_w))
-            # # RGBA did not work.
-            # rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
-            # rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
-            # rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
-            # rd_indices_a = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 3)))
-            # rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b, rd_indices_a))
-            # assert rd_indices.get_shape().as_list()[0] == 40 * 4 and rd_indices.get_shape().as_list()[1] == 3 and len(targets.get_shape().as_list()) == 3
-
-            # # RGB
-            # rd_indices_r = tf.concat(1,(rd_indices_2d, tf.constant(np.zeros((num_hints,1), dtype=np.int32))))
-            # rd_indices_g = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 1)))
-            # rd_indices_b = tf.concat(1,(rd_indices_2d, tf.constant(np.ones((num_hints,1), dtype=np.int32) * 2)))
-            # rd_indices = tf.concat(0,(rd_indices_r,rd_indices_g,rd_indices_b))
-            # assert rd_indices.get_shape().as_list()[0] == 40 * 3 and rd_indices.get_shape().as_list()[1] == 3 and len(
-            #     targets.get_shape().as_list()) == 3
-
-            # Try not concat by hand
-            rd_indices = rd_indices_2d
-
 
             targets_rgba = tf.concat(2,(targets,np.ones(targets.get_shape().as_list()[:-1] + [1])))
-            hints = tf.gather_nd(targets_rgba, rd_indices)
+            hints = tf.gather_nd(targets_rgba, rd_indices_2d)
 
             # hints = tf.gather_nd(targets, rd_indices)
             clear_hint_op = tf.assign(output, blank_hint)
@@ -349,25 +328,6 @@ def load_examples(user_hint = None):
                 half_constant = tf.constant(0.50)
 
                 output = tf.cond(tf.less(random_condition, half_constant), lambda: output, lambda: tf.scatter_nd_update(output, rd_indices, hints))
-
-                # output = tf.scatter_nd_update(output, rd_indices, hints)
-
-            # update_hint_op = tf.scatter_nd_update(output, rd_indices, hints)
-
-            # Not exactly the same as the hints in chainer, so I put the code in chainer here for reference
-            # for ch in xrange(3):
-            #     d = 20
-            #     v = target[x[i]][y[i]][ch] + np.random.normal(0, 5)
-            #     v = np.floor(v / d + 0.5) * d
-            #     hints[x[i]][y[i]][ch] = v
-            # if np.random.rand() > 0.5:
-            #     for ch in xrange(3):
-            #         hints[x[i]][y[i] + 1][ch] = target[x[i]][y[i]][ch]
-            #         hints[x[i]][y[i] - 1][ch] = target[x[i]][y[i]][ch]
-            # if np.random.rand() > 0.5:
-            #     for ch in xrange(3):
-            #         hints[x[i] + 1][y[i]][ch] = target[x[i]][y[i]][ch]
-            #         hints[x[i] - 1][y[i]][ch] = target[x[i]][y[i]][ch]
         else:
             output = tf.assign(output, user_hint)
 
@@ -380,7 +340,6 @@ def load_examples(user_hint = None):
     with tf.name_scope("input_images"):
         input_images = transform(inputs)
         if a.use_hint:
-            # TODO: change it so that the input can also include hint for testing mode.
             input_images, input_hints = append_hint(input_images, target_images, user_hint=user_hint)
 
 
@@ -408,23 +367,14 @@ def create_model(inputs, targets):
         with tf.variable_scope("encoder_1"):
             output = conv(generator_inputs, a.ngf, stride=2)
             layers.append(output)
-        if CROP_SIZE != 512:
-            raise AssertionError('crop size must be 512')
-            """
-            InvalidArgumentError (see above for traceback): Assign requires shapes of both tensors to match. lhs shape= [512,512,4] rhs shape= [128,128,4]
-            [[Node: save/Assign_161 = Assign[T=DT_FLOAT, _class=["loc:@output"], use_locking=true, validate_shape=true, _device="/job:localhost/replica:0/task:0/cpu:0"](output, save/RestoreV2_161)]]
-            [[Node: save/RestoreV2_67/_941 = _Recv[client_terminated=false, recv_device="/job:localhost/replica:0/task:0/gpu:0", send_device="/job:localhost/replica:0/task:0/cpu:0", send_device_incarnation=1, tensor_name="edge_1439_save/RestoreV2_67", tensor_type=DT_FLOAT, _device="/job:localhost/replica:0/task:0/gpu:0"]()]]
-            """
-        else:
-
-            layer_specs = [
-                a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-                a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-                a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-                a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-                a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-                a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-            ]
+        layer_specs = [
+            a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
+            a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
+            a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
+            a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+            a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+            a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+        ]
         # else:
         #     layer_specs = [
         #         a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
@@ -444,17 +394,14 @@ def create_model(inputs, targets):
                 output = batchnorm(convolved)
                 layers.append(output)
 
-        if CROP_SIZE != 512:
-            raise AssertionError('crop size must be 512')
-        else:
-            layer_specs = [
-                (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-                (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-                (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-                (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-                (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-                (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-            ]
+        layer_specs = [
+            (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+            (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+            (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+            (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+            (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+            (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+        ]
         # else:
         #     layer_specs = [
         #         (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
@@ -942,26 +889,15 @@ def main():
 
 
 main()
-"""--input_dir=/home/xor/pixiv_images/test_images_sketches/line/ --b_dir=/home/xor/pixiv_images/test_images_sketches/color/ --operation=combine --output_dir=/home/xor/pixiv_images/test_images_sketches_combined/"""
-"""
-# train the model (this may take 1-8 hours depending on GPU, on CPU you will be waiting for a bit)
-python pix2pix.py --mode train --output_dir facades_train --max_epochs 200 --input_dir facades/train --which_direction BtoA --display_freq=5000
-# test the model
-python pix2pix.py --mode test --output_dir facades_test --input_dir facades/val --checkpoint facades_train
-"""
-
 
 """
 --mode train --output_dir sanity_check_train --max_epochs 200 --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --display_freq=5 --use_hint
 --mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
 """
-python pix2pix_w_hint.py --mode train --output_dir pixiv_full_128_w_hint_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
-python pix2pix_w_hint.py --mode train --output_dir pixiv_full_128_w_hint_tiny --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=50 --save_freq=500 --gray_input_a --use_hint --batch_size 1 --gpu_percentage 0.45
-
-python pix2pix_w_hint.py --mode train --output_dir pixiv_full_512_w_hint_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45
-
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_w_hint_train --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --checkpoint=pixiv_full_512_w_hint_train
+# TO train a network that turns colored images into sketches:
+python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45
 
 """
 
