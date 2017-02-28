@@ -411,6 +411,7 @@ class NNEncode():
 
         wts = np.exp(-dists**2/(2*self.sigma**2))
         wts = wts/np.sum(wts,axis=1)[:,na()]
+        np.testing.assert_equal(np.isnan(wts).any(),False)
 
         self.pts_enc_flt[self.p_inds,inds] = wts
         pts_enc_nd = unflatten_2d_array(self.pts_enc_flt,pts_nd,axis=axis)
