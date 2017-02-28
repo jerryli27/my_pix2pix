@@ -808,7 +808,7 @@ def main():
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
         if a.use_sketch_loss and a.checkpoint is None:
-            sketch_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+            sketch_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator") # TODO: shouldn't the sketch network be fixed??? Shouldn't this reutrn empty list and we should use global variables instead?
             other_var = [var for var in tf.global_variables() if
                          (var not in sketch_var)]
             print("number of sketch var = %d, number of other var = %d"
