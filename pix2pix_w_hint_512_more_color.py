@@ -777,11 +777,11 @@ def create_model(inputs, targets, targets_bin = None):
         else:
             outputs = create_generator(inputs, out_channels)
 
-        if a.use_sketch_loss:
-            with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-                fake_sketches = create_generator(outputs, 1, trainable=False)
-            with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-                real_sketches = create_generator(targets, 1, trainable=False)
+    if a.use_sketch_loss:
+        with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
+            fake_sketches = create_generator(outputs, 1, trainable=False)
+        with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
+            real_sketches = create_generator(targets, 1, trainable=False)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -1019,25 +1019,30 @@ def main():
                 return tf.image.convert_image_dtype(image_rgba, dtype=tf.uint8, saturate=True)
 
     # reverse any processing on images so they can be written to disk or displayed to user
+
     with tf.name_scope("deprocess_inputs"):
-        if a.use_hint:
-            deprocessed_inputs = deprocess(examples.inputs[...,:1])
-            deprocessed_hints = deprocess(examples.inputs[...,1:])
+        if a.use_bin:
+            if a.use_hint:
+                deprocessed_inputs = deprocess(inputs[...,:1])
+                deprocessed_hints = deprocess(inputs[...,1:])
+            else:
+                deprocessed_inputs = deprocess(inputs)
         else:
-            deprocessed_inputs = deprocess(examples.inputs)
+            if a.use_hint:
+                deprocessed_inputs = deprocess(examples.inputs[...,:1])
+                deprocessed_hints = deprocess(examples.inputs[...,1:])
+            else:
+                deprocessed_inputs = deprocess(examples.inputs)
 
 
     with tf.name_scope("deprocess_targets"):
-        deprocessed_targets = deprocess(examples.targets)
+        if a.use_bin:
+            deprocessed_targets = deprocess(targets)
+        else:
+            deprocessed_targets = deprocess(examples.targets)
 
     with tf.name_scope("deprocess_outputs"):
-        outputs = model.outputs
-        # if a.use_bin:
-        #     # outputs = i2b_encoder.bin_to_img(outputs)
-        #     deprocessed_outputs = outputs
-        # else:
-        #     deprocessed_outputs = deprocess(outputs)
-        deprocessed_outputs = deprocess(outputs)
+        deprocessed_outputs = deprocess(model.outputs)
 
     with tf.name_scope("encode_images"):
         # if a.use_bin:
@@ -1290,14 +1295,9 @@ python pix2pix_w_hint_512_more_color.py --mode train --output_dir sanity_check_t
 --mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
 """
-TODO: don't forget to add  --use_bin
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_w_hint_train --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --checkpoint=pixiv_full_512_w_hint_train
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0002 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --from_128 --checkpoint=pixiv_full_512_wgan_w_hint_sketch_loss
+python pix2pix_w_hint_512_more_color.py --mode train --output_dir pixiv_full_128_wgan_w_hint_sketch_loss_more_color --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
+python pix2pix_w_hint_512_more_color.py --mode train --output_dir pixiv_full_512_wgan_w_hint_sketch_loss_more_color --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0002 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --from_128 --checkpoint=pixiv_full_512_wgan_w_hint_sketch_loss --use_bin
 # TO train a network that turns colored images into sketches:
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
-
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --train_sketch
 
 
