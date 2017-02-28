@@ -260,7 +260,7 @@ class ImgToRgbBinEncoder():
         # self.index_matrix = np.array(index_matrix, dtype=np.uint8)
         self.index_matrix = np.array(index_matrix, dtype=np.float32)
         # self.nnencode = NNEncode(5,5,cc=self.index_matrix)
-        self.nnencode = NNEncode(5.,0.05,cc=self.index_matrix)
+        self.nnencode = NNEncode(5,1.0,cc=self.index_matrix)
     def img_to_bin(self, img, return_sparse = False):
 
         """
@@ -402,6 +402,12 @@ class NNEncode():
             (dists, inds) = self.nbrs.closest_neighbor(pts_flt)
         else:
             (dists,inds) = self.nbrs.kneighbors(pts_flt)
+
+        # This is reweighing each color bin based on their distance to the point.
+        # THIS IS WHAT I ADDED TO PREVENT NAN LOSS ERROR... DON"T KNOW WHERE THE ERROR CAME FROM,
+        dists[dists > 2.0] = 2.0
+        dists[dists < -2.0] = -2.0
+
 
         wts = np.exp(-dists**2/(2*self.sigma**2))
         wts = wts/np.sum(wts,axis=1)[:,na()]
