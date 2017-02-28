@@ -260,7 +260,7 @@ class ImgToRgbBinEncoder():
         # self.index_matrix = np.array(index_matrix, dtype=np.uint8)
         self.index_matrix = np.array(index_matrix, dtype=np.float32)
         # self.nnencode = NNEncode(5,5,cc=self.index_matrix)
-        self.nnencode = NNEncode(5.,5.0,cc=self.index_matrix)
+        self.nnencode = NNEncode(5.,0.05,cc=self.index_matrix)
     def img_to_bin(self, img, return_sparse = False):
 
         """
@@ -682,7 +682,7 @@ def create_model(inputs, targets):
             input = tf.concat(3,[layers[-1], layers[0]])
             rectified = tf.nn.relu(input)
             output = deconv(rectified, generator_outputs_channels, trainable=trainable)
-            output = tf.tanh(output)
+            # output = tf.tanh(output) # TODO: commented this out because I'm going to change the loss function to softmax cross entropy instead.
             layers.append(output)
 
         return layers[-1]
@@ -767,7 +767,8 @@ def create_model(inputs, targets):
         # predict_fake => 1
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
-        gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        # gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        gen_loss_L1 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(outputs, targets))
         if a.use_sketch_loss:
             gen_loss_sketch = tf.reduce_mean(tf.abs(fake_sketches - real_sketches))
             gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight + gen_loss_sketch * a.sketch_weight
@@ -1176,9 +1177,11 @@ def main():
                         contents = results["display"]["outputs"]
                         content_images = []
                         for content_i, content in enumerate(contents):
-                            content_image = i2b_encoder.bin_to_img(content)
-
+                            content_image = i2b_encoder.bin_to_img(content, t=1.00)
+                            print('current_targets_bin shape: %s sum: %f' %(str(content.shape), np.sum(content)))
+                            print('content shape: %s sum: %f' %(str(content_image.shape), np.sum(content_image)))
                             content_images.append(content_image)
+
                         content_images = np.array(content_images, dtype=np.float32)
                         outputs_images_feed_dict = {outputs_images: content_images}
                         encoded_content_images, = sess.run([encoded_outputs], feed_dict=outputs_images_feed_dict)
@@ -1213,13 +1216,16 @@ def main():
 main()
 
 """
+
+python pix2pix_w_hint_512_more_color.py --mode train --output_dir sanity_check_train_more_color --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --lr 0.008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
 --mode train --output_dir sanity_check_train --max_epochs 200 --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --display_freq=5 --use_hint
 --mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
 """
+TODO: don't forget to add  --use_bin
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_w_hint_train --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --checkpoint=pixiv_full_512_w_hint_train
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint
+python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0002 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --from_128 --checkpoint=pixiv_full_512_wgan_w_hint_sketch_loss
 # TO train a network that turns colored images into sketches:
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
