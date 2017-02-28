@@ -84,12 +84,12 @@ if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
 
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
+T_VALUE = 1.0 # 0.38 in the original paper.
 
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
-
+Model = collections.namedtuple("Model", "outputs, outputs_bin, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
 
 def conv(batch_input, out_channels, stride, trainable=True):
     with tf.variable_scope("conv"):
@@ -335,10 +335,41 @@ class ImgToRgbBinEncoder():
         return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=len(rgb_bin.shape) - 1)
 
 
+
+    def bin_to_img_tf(self, rgb_bin, t = 0.01, do_softmax = True):
+        """
+        This function uses annealed-mean technique in the paper.
+        :param rgb_bin:
+        :param t: t = 0.38 in the original paper
+        """
+
+        if len(rgb_bin.get_shape().as_list()) != 4 and len(rgb_bin.get_shape().as_list()) != 3:
+            raise AssertionError("The rgb_bin must have shape (batch, height, width, 3), or (height, width, 3), not %s" %str(rgb_bin.get_shape().as_list()))
+        if len(rgb_bin.get_shape().as_list()) == 4:
+            batch, height, width, num_channel = rgb_bin.get_shape().as_list()
+        else:
+            height, width, num_channel = rgb_bin.get_shape().as_list()
+        if num_channel != self.bin_num**3:
+            raise AssertionError("The rgb_bin must have bin_num**3 channels, not %d." % num_channel)
+        # This is not the correct way to normalize. The correct way is to just apply a softmax...
+        # rgb_bin_normalized = rgb_bin/np.sum(rgb_bin,axis=3,keepdims=True)
+        if do_softmax:
+            rgb_bin_softmax = tf.nn.softmax(rgb_bin, name='rgb_bin_softmax')
+            # rgb_bin_exp = tf.exp(rgb_bin, name='rgb_bin_exp')
+            # # rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=3,keepdims=True)
+            # rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=len(rgb_bin.get_shape().as_list()) - 1,keepdims=True)
+        else:
+            rgb_bin_softmax = rgb_bin
+
+        exp_log_z_div_t = tf.exp(tf.divide(tf.log(rgb_bin_softmax),t))
+        # annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=3, keepdims=True),0.000001)
+        # return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=3)
+        annealed_mean = exp_log_z_div_t / tf.add(tf.reduce_sum(exp_log_z_div_t, axis=len(rgb_bin.get_shape().as_list()) - 1, keep_dims=True),0.000001)
+        return self.nnencode.decode_points_mtx_nd_tf(annealed_mean)
+
+
     def gaussian_kernel(self,arr,std):
         return np.exp(-arr**2 / (2 * std**2))
-
-
 
 class NNEncode():
     ''' Encode points using NN search and Gaussian kernel '''
@@ -384,6 +415,14 @@ class NNEncode():
         pts_enc_flt = flatten_nd_array(pts_enc_nd,axis=axis)
         pts_dec_flt = np.dot(pts_enc_flt,self.cc)
         pts_dec_nd = unflatten_2d_array(pts_dec_flt,pts_enc_nd,axis=axis)
+        return pts_dec_nd
+
+    def decode_points_mtx_nd_tf(self,pts_enc_nd,axis=-1):
+        assert axis == -1
+        input_shape = pts_enc_nd.get_shape().as_list()
+        pts_enc_flt = tf.reshape(pts_enc_nd,[-1, input_shape[-1]])
+        pts_dec_flt = tf.matmul(pts_enc_flt,self.cc)
+        pts_dec_nd = tf.reshape(pts_dec_flt, input_shape[:-1] + [-1])
         return pts_dec_nd
 
     # def decode_1hot_mtx_nd(self,pts_enc_nd,axis=1,returnEncode=False):
@@ -457,6 +496,10 @@ def unflatten_2d_array(pts_flt,pts_nd,axis=1,squeeze=False):
         pts_out = pts_out.transpose(axorder_rev)
 
     return pts_out
+
+# TODO: UGLY CODE BUT WORKS FOR NOW
+if a.use_bin:
+    i2b_encoder = ImgToRgbBinEncoder(a.num_bin_per_channel)
 
 def load_examples(user_hint = None):
     if not os.path.exists(a.input_dir):
@@ -600,7 +643,7 @@ def load_examples(user_hint = None):
     )
 
 
-def create_model(inputs, targets):
+def create_model(inputs, targets, targets_bin = None):
     def create_generator(generator_inputs, generator_outputs_channels, trainable = True):
         layers = []
 
@@ -687,7 +730,10 @@ def create_model(inputs, targets):
 
         return layers[-1]
 
+
     def create_discriminator(discrim_inputs, discrim_targets):
+        # The discriminator needs to take in the rgb image instead of rgb bins. Otherwise it would be too easy to tell
+        # the real ones from the fake ones because the real ones always have probability = 1 in only one bin. TODO:
         n_layers = 3
         layers = []
 
@@ -722,14 +768,20 @@ def create_model(inputs, targets):
         return layers[-1]
 
     with tf.variable_scope("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-        out_channels = int(targets.get_shape()[-1])
-        outputs = create_generator(inputs, out_channels)
+        out_channels = int(targets.get_shape()[-1]) if not a.use_bin else int(targets_bin.get_shape()[-1])
+        if a.use_bin:
 
-    if a.use_sketch_loss:
-        with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            fake_sketches = create_generator(outputs, 1, trainable=False)
-        with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            real_sketches = create_generator(targets, 1, trainable=False)
+            outputs_bin = create_generator(inputs, out_channels)
+            # Lastly we need to decode it back into rgb.
+            outputs = i2b_encoder.bin_to_img_tf(outputs_bin, T_VALUE)
+        else:
+            outputs = create_generator(inputs, out_channels)
+
+        if a.use_sketch_loss:
+            with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
+                fake_sketches = create_generator(outputs, 1, trainable=False)
+            with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
+                real_sketches = create_generator(targets, 1, trainable=False)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -751,6 +803,7 @@ def create_model(inputs, targets):
             if a.use_hint:
                 print("creating discr without hint. FOR NOW")
                 print(inputs[...,:1].get_shape().as_list())
+                print("output shape: %s" %str(outputs.get_shape().as_list()))
                 predict_fake = create_discriminator(inputs[...,:1], outputs)
             else:
                 predict_fake = create_discriminator(inputs, outputs)
@@ -768,7 +821,10 @@ def create_model(inputs, targets):
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
         # gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss_L1 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(outputs, targets))
+        if a.use_bin:
+            gen_loss_L1 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(outputs_bin, targets_bin))
+        else:
+            gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         if a.use_sketch_loss:
             gen_loss_sketch = tf.reduce_mean(tf.abs(fake_sketches - real_sketches))
             gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight + gen_loss_sketch * a.sketch_weight
@@ -803,6 +859,7 @@ def create_model(inputs, targets):
         gen_loss_L1=ema.average(gen_loss_L1),
         gen_loss_sketch=ema.average(gen_loss_sketch) if a.use_sketch_loss else None,
         outputs=outputs,
+        outputs_bin=outputs_bin if a.use_bin else None,
         train=tf.group(update_losses, incr_global_step, gen_train),
     )
 
@@ -857,9 +914,6 @@ def main():
     if a.seed is None:
         a.seed = random.randint(0, 2**31 - 1)
 
-    if a.use_bin:
-        i2b_encoder = ImgToRgbBinEncoder(a.num_bin_per_channel)
-
     tf.set_random_seed(a.seed)
     np.random.seed(a.seed)
     random.seed(a.seed)
@@ -908,14 +962,16 @@ def main():
     # target_ph = tf.placeholder(tf.float32,shape=examples.targets.get_shape())
     if a.use_bin:
         inputs = tf.placeholder(tf.float32,shape=examples.inputs.get_shape().as_list(), name="inputs")
-        targets = tf.placeholder(tf.float32,shape=examples.targets.get_shape().as_list()[:-1] + [a.num_bin_per_channel ** 3], name="targets_bin")
+        targets = tf.placeholder(tf.float32,shape=examples.targets.get_shape().as_list(), name="targets")
+        targets_bin = tf.placeholder(tf.float32,shape=examples.targets.get_shape().as_list()[:-1] + [a.num_bin_per_channel ** 3], name="targets_bin")
         # i2b_encoder.img_to_bin(examples.targets)
     else:
         inputs = examples.inputs
         targets = examples.targets
+        targets_bin = None
 
 
-    model = create_model(inputs, targets)
+    model = create_model(inputs, targets, targets_bin=targets_bin)
     # model = create_model(input_ph, target_ph)
 
     def deprocess(image):
@@ -976,33 +1032,48 @@ def main():
 
     with tf.name_scope("deprocess_outputs"):
         outputs = model.outputs
-        if a.use_bin:
-            # outputs = i2b_encoder.bin_to_img(outputs)
-            deprocessed_outputs = outputs
-        else:
-            deprocessed_outputs = deprocess(outputs)
+        # if a.use_bin:
+        #     # outputs = i2b_encoder.bin_to_img(outputs)
+        #     deprocessed_outputs = outputs
+        # else:
+        #     deprocessed_outputs = deprocess(outputs)
+        deprocessed_outputs = deprocess(outputs)
 
     with tf.name_scope("encode_images"):
-        if a.use_bin:
-            outputs_images = tf.placeholder(tf.float32, shape=[None] + examples.targets.get_shape().as_list()[1:], name='outputs_images')
-            print(outputs_images.get_shape().as_list()) # TODO: delete.
-            deprocessed_outputs_images = deprocess(outputs_images)
-            encoded_outputs = tf.map_fn(tf.image.encode_png, deprocessed_outputs_images, dtype=tf.string, name="encoded_outputs")
+        # if a.use_bin:
+        #     outputs_images = tf.placeholder(tf.float32, shape=[None] + examples.targets.get_shape().as_list()[1:], name='outputs_images')
+        #     print(outputs_images.get_shape().as_list()) # TODO: delete.
+        #     deprocessed_outputs_images = deprocess(outputs_images)
+        #     encoded_outputs = tf.map_fn(tf.image.encode_png, deprocessed_outputs_images, dtype=tf.string, name="encoded_outputs")
+        # if a.use_hint:
+        #     display_fetches = {
+        #         "paths": examples.paths,
+        #         "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
+        #         "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
+        #         "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
+        #         "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs") if not a.use_bin else deprocessed_outputs, # TODO: change this part to be dependent on use_bin
+        #     }
+        # else:
+        #     display_fetches = {
+        #         "paths": examples.paths,
+        #         "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
+        #         "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
+        #         "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs") if not a.use_bin else deprocessed_outputs,
+        #     }
         if a.use_hint:
             display_fetches = {
                 "paths": examples.paths,
                 "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                 "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
                 "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
-                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs") if not a.use_bin else deprocessed_outputs, # TODO: change this part to be dependent on use_bin
+                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs")
             }
         else:
             display_fetches = {
                 "paths": examples.paths,
                 "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                 "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
-                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs") if not a.use_bin else deprocessed_outputs,
-
+                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs")
             }
 
     # summaries
@@ -1128,10 +1199,9 @@ def main():
                 # print(np.sum(io_results["targets"]))
 
                 if a.use_bin:
-
                     current_inputs, current_targets = sess.run([examples.inputs, examples.targets])
                     current_targets_bin = i2b_encoder.img_to_bin(current_targets)
-                    feed_dict = {inputs: current_inputs, targets: current_targets_bin}
+                    feed_dict = {inputs: current_inputs, targets: current_targets, targets_bin:current_targets_bin}
                 else:
                     feed_dict = None
 
@@ -1173,21 +1243,19 @@ def main():
                 if should(a.display_freq):
                     print("saving display images")
 
-                    if a.use_bin:
-                        contents = results["display"]["outputs"]
-                        content_images = []
-                        for content_i, content in enumerate(contents):
-                            content_image = i2b_encoder.bin_to_img(content, t=1.00)
-                            print('current_targets_bin shape: %s sum: %f' %(str(content.shape), np.sum(content)))
-                            print('content shape: %s sum: %f' %(str(content_image.shape), np.sum(content_image)))
-                            content_images.append(content_image)
-
-                        content_images = np.array(content_images, dtype=np.float32)
-                        outputs_images_feed_dict = {outputs_images: content_images}
-                        encoded_content_images, = sess.run([encoded_outputs], feed_dict=outputs_images_feed_dict)
-                        results["display"]["outputs"] = encoded_content_images
-                        # print('encoded images shape: %s' %(str(encoded_images.shape)))
-                        # results["display"]["outputs"] = encoded_images
+                    # if a.use_bin:
+                    #     contents = results["display"]["outputs"]
+                    #     content_images = []
+                    #     for content_i, content in enumerate(contents):
+                    #         content_image = i2b_encoder.bin_to_img(content, t=1.00)
+                    #         print('current_targets_bin shape: %s sum: %f' %(str(content.shape), np.sum(content)))
+                    #         print('content shape: %s sum: %f' %(str(content_image.shape), np.sum(content_image)))
+                    #         content_images.append(content_image)
+                    #
+                    #     content_images = np.array(content_images, dtype=np.float32)
+                    #     outputs_images_feed_dict = {outputs_images: content_images}
+                    #     encoded_content_images, = sess.run([encoded_outputs], feed_dict=outputs_images_feed_dict)
+                    #     results["display"]["outputs"] = encoded_content_images
                     filesets = save_images(results["display"], image_dir, step=results["global_step"])
                     # filesets = save_images(io_results["display"], image_dir, step=results["global_step"])
                     append_index(filesets, step=True)
@@ -1217,7 +1285,7 @@ main()
 
 """
 
-python pix2pix_w_hint_512_more_color.py --mode train --output_dir sanity_check_train_more_color --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --lr 0.008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
+python pix2pix_w_hint_512_more_color.py --mode train --output_dir sanity_check_train_more_color --max_epochs 500 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --lr 0.008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
 --mode train --output_dir sanity_check_train --max_epochs 200 --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --display_freq=5 --use_hint
 --mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
