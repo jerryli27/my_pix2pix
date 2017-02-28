@@ -86,14 +86,20 @@ Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, st
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
 
 
-def conv(batch_input, out_channels, stride, trainable=True):
+def conv(batch_input, out_channels, stride, pad=1, dilation=1, trainable=True):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
         filter = tf.get_variable("filter", [4, 4, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02), trainable=trainable)
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
-        padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
-        conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
+        if dilation == 1:
+            padded_input = tf.pad(batch_input, [[0, 0], [pad, pad], [pad, pad], [0, 0]], mode="CONSTANT")
+            conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
+        else:
+            # conv = tf.nn.atrous_conv2d(padded_input, filter, dilation, padding="VALID")
+            conv = tf.nn.atrous_conv2d(batch_input, filter, dilation, padding="SAME")
+
+
         return conv
 
 
@@ -389,6 +395,92 @@ def create_model(inputs, targets):
             a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
             a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
         ]
+
+        for dilation_i,out_channels in enumerate(layer_specs):
+
+                rectified = lrelu(layers[-1], 0.2)
+                if dilation_i < 3:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+
+                    with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+                        convolved_1 = conv(rectified, out_channels / 2, stride=2, trainable=trainable)
+                    with tf.variable_scope("encoder_dilation_%d" % (len(layers) + 1)):
+                        convolved_2 = conv(convolved_1, out_channels / 2,stride=None, dilation=2**(dilation_i+1), trainable=trainable)
+                    convolved = tf.concat(3,[convolved_1,convolved_2])
+                else:
+                    with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+                        convolved = conv(rectified, out_channels, stride=2, trainable=trainable)
+                with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+                    output = batchnorm(convolved)
+                    layers.append(output)
+
+        layer_specs = [
+            (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+            (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+            (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+            (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+            (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+            (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+        ]
+        # else:
+        #     layer_specs = [
+        #         (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
+        #         (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+        #         (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+        #         (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+        #         (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+        #         (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+        #         (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+        #     ]
+        num_encoder_layers = len(layers)
+        for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
+            skip_layer = num_encoder_layers - decoder_layer - 1
+            with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
+                if decoder_layer == 0:
+                    # first decoder layer doesn't have skip connections
+                    # since it is directly connected to the skip_layer
+                    input = layers[-1]
+                else:
+                    # Can't find concat_v2 so commenting this out.
+                    #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
+                    input = tf.concat(3, [layers[-1], layers[skip_layer]])
+
+                rectified = tf.nn.relu(input)
+                # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                output = deconv(rectified, out_channels, trainable=trainable)
+                output = batchnorm(output, trainable=trainable)
+
+                if dropout > 0.0:
+                    output = tf.nn.dropout(output, keep_prob=1 - dropout)
+
+                layers.append(output)
+
+        # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
+        with tf.variable_scope("decoder_1"):
+            #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
+            input = tf.concat(3,[layers[-1], layers[0]])
+            rectified = tf.nn.relu(input)
+            output = deconv(rectified, generator_outputs_channels, trainable=trainable)
+            output = tf.tanh(output)
+            layers.append(output)
+
+        return layers[-1]
+
+    def create_sketch_generator(generator_inputs, generator_outputs_channels, trainable = True):
+        layers = []
+
+        # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+        with tf.variable_scope("encoder_1"):
+            output = conv(generator_inputs, a.ngf, stride=2, trainable=trainable)
+            layers.append(output)
+        layer_specs = [
+            a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
+            a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
+            a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
+            a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+            a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+            a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+        ]
         # else:
         #     layer_specs = [
         #         a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
@@ -500,9 +592,9 @@ def create_model(inputs, targets):
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            fake_sketches = create_generator(outputs, 1, trainable=False)
+            fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            real_sketches = create_generator(targets, 1, trainable=False)
+            real_sketches = create_sketch_generator(targets, 1, trainable=False)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -947,16 +1039,7 @@ main()
 --mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
 """
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_w_hint_train --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --use_hint --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --checkpoint=pixiv_full_512_w_hint_train
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_512_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_full_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0002 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --from_128 --checkpoint=pixiv_full_512_wgan_w_hint_sketch_loss
-# TO train a network that turns colored images into sketches:
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
-
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --train_sketch
-
-
+python pix2pix_w_hint_better_gen_2.py --mode train --output_dir pixiv_full_128_wgan_w_hint_sketch_loss_better_gen_2 --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage=0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint
 """
 
 """

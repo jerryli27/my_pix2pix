@@ -19,6 +19,7 @@ import collections
 import math
 import time
 import urllib
+from sklearn.neighbors import NearestNeighbors
 
 from general_util import imread
 
@@ -69,6 +70,10 @@ parser.add_argument("--use_sketch_loss", dest="use_sketch_loss", action="store_t
                     help="Use the pretrained sketch generator network to compare the sketches of the generated image "
                          "versus that of the original image.")
 parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
+parser.add_argument("--use_bin", dest="use_bin", action="store_true",
+                    help="Output a probability distribution of color bins instead of one single color. It should make "
+                         "the output more colorful.")
+parser.add_argument("--num_bin_per_channel", type=int, default=6, help="number of bins per r, g, b channel")
 
 
 
@@ -230,6 +235,228 @@ def lab_to_rgb(lab):
 
         return tf.reshape(srgb_pixels, tf.shape(lab))
 
+class ImgToRgbBinEncoder():
+    def __init__(self,bin_num=6):
+        self.bin_num=bin_num
+        index_matrix=  []
+        pixel_max_val = 1.0  # Originally it was 255.0 but for the current program it is different.
+        pixel_min_val = -1.0
+        assert pixel_min_val < pixel_max_val
+        step_size = (pixel_max_val - pixel_min_val) / (bin_num - 1)
+        r, g, b = pixel_min_val, pixel_min_val, pixel_min_val
+        while r <= pixel_max_val:
+            # r_rounded = round(r)
+            g = pixel_min_val
+            while g <= pixel_max_val:
+                # g_rounded = round(g)
+                b = pixel_min_val
+                while b <= pixel_max_val:
+                    # b_rounded = round(b)
+                    # index_matrix.append([r_rounded, g_rounded, b_rounded])
+                    index_matrix.append([r, g, b])
+                    b += step_size
+                g += step_size
+            r += step_size
+        # self.index_matrix = np.array(index_matrix, dtype=np.uint8)
+        self.index_matrix = np.array(index_matrix, dtype=np.float32)
+        # self.nnencode = NNEncode(5,5,cc=self.index_matrix)
+        self.nnencode = NNEncode(5.,5.0,cc=self.index_matrix)
+    def img_to_bin(self, img, return_sparse = False):
+
+        """
+
+        :param img:  An image represented in numpy array with shape (batch, height, width, 3)
+        :param bin_num: number of bins for each color dimension
+        :return:  An image represented in numpy array with shape (batch, height, width, bin_num ** 3)
+        """
+        if len(img.shape) != 4 and len(img.shape) != 3:
+            raise AssertionError("The image must have shape (batch, height, width, 3), or (height, width, 3), not %s" %str(img.shape))
+        if len(img.shape) == 4:
+            batch, height, width, num_channel = img.shape
+        else:
+            height, width, num_channel = img.shape
+        if num_channel != 3:
+            raise AssertionError("The image must have 3 channels representing rgb. not %d." %num_channel)
+
+        # nbrs = NearestNeighbors(n_neighbors=5, algorithm='ball_tree').fit(index_matrix)
+        #
+        # img_resized = np.reshape(img, (batch * height * width, num_channel))
+        #
+        # # Shape batch * height * width, 5
+        # distances, indices = nbrs.kneighbors(img_resized)
+        #
+        #
+        #
+        # # In the original paper they used a gaussian kernel with delta = 5.
+        # distances = gaussian_kernel(distances, std=5.0)
+        #
+        # rgb_bin = np.zeros((batch * height * width, bin_num ** 3))
+        #
+        # for bhw in range(batch * height * width):
+        #     for i in range(5):
+        #         rgb_bin[bhw,indices[bhw,i]] = distances[bhw, i]
+        #
+        #
+        # return rgb_bin
+
+        # return self.nnencode.encode_points_mtx_nd(img,axis=3, return_sparse=return_sparse)
+        return self.nnencode.encode_points_mtx_nd(img,axis=len(img.shape)-1, return_sparse=return_sparse)
+
+
+
+    def bin_to_img(self, rgb_bin, t = 0.01, do_softmax = True):
+        """
+        This function uses annealed-mean technique in the paper.
+        :param rgb_bin:
+        :param t: t = 0.38 in the original paper
+        """
+
+        if len(rgb_bin.shape) != 4 and len(rgb_bin.shape) != 3:
+            raise AssertionError("The rgb_bin must have shape (batch, height, width, 3), or (height, width, 3), not %s" %str(rgb_bin.shape))
+        if len(rgb_bin.shape) == 4:
+            batch, height, width, num_channel = rgb_bin.shape
+        else:
+            height, width, num_channel = rgb_bin.shape
+        if num_channel != self.bin_num**3:
+            raise AssertionError("The rgb_bin must have bin_num**3 channels, not %d." % num_channel)
+        # This is not the correct way to normalize. The correct way is to just apply a softmax...
+        # rgb_bin_normalized = rgb_bin/np.sum(rgb_bin,axis=3,keepdims=True)
+        if do_softmax:
+            rgb_bin_exp = np.exp(rgb_bin)
+            # rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=3,keepdims=True)
+            rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=len(rgb_bin.shape) - 1,keepdims=True)
+        else:
+            rgb_bin_softmax = rgb_bin
+
+        exp_log_z_div_t = np.exp(np.divide(np.log(rgb_bin_softmax),t))
+        # annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=3, keepdims=True),0.000001)
+        # return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=3)
+        annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=len(rgb_bin.shape) - 1, keepdims=True),0.000001)
+        return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=len(rgb_bin.shape) - 1)
+
+
+    def gaussian_kernel(self,arr,std):
+        return np.exp(-arr**2 / (2 * std**2))
+
+
+
+class NNEncode():
+    ''' Encode points using NN search and Gaussian kernel '''
+    def __init__(self,NN,sigma,km_filepath='',cc=-1):
+        if(check_value(cc,-1)):
+            self.cc = np.load(km_filepath)
+        else:
+            self.cc = cc
+        self.K = self.cc.shape[0]
+        self.NN = int(NN)
+        self.sigma = sigma
+        self.nbrs = NearestNeighbors(n_neighbors=NN, algorithm='ball_tree').fit(self.cc)
+        self.closest_neighbor = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(self.cc)
+
+        self.alreadyUsed = False
+
+    def encode_points_mtx_nd(self,pts_nd,axis=1,return_sparse=False,sameBlock=True):
+        pts_flt = flatten_nd_array(pts_nd,axis=axis)
+        P = pts_flt.shape[0]
+        if(sameBlock and self.alreadyUsed):
+            self.pts_enc_flt[...] = 0 # already pre-allocated
+        else:
+            self.alreadyUsed = True
+            self.pts_enc_flt = np.zeros((P,self.K))
+            self.p_inds = np.arange(0,P,dtype='int')[:,na()]
+
+        P = pts_flt.shape[0]
+
+        if return_sparse:
+            (dists, inds) = self.nbrs.closest_neighbor(pts_flt)
+        else:
+            (dists,inds) = self.nbrs.kneighbors(pts_flt)
+
+        wts = np.exp(-dists**2/(2*self.sigma**2))
+        wts = wts/np.sum(wts,axis=1)[:,na()]
+
+        self.pts_enc_flt[self.p_inds,inds] = wts
+        pts_enc_nd = unflatten_2d_array(self.pts_enc_flt,pts_nd,axis=axis)
+
+        return pts_enc_nd
+
+    def decode_points_mtx_nd(self,pts_enc_nd,axis=1):
+        pts_enc_flt = flatten_nd_array(pts_enc_nd,axis=axis)
+        pts_dec_flt = np.dot(pts_enc_flt,self.cc)
+        pts_dec_nd = unflatten_2d_array(pts_dec_flt,pts_enc_nd,axis=axis)
+        return pts_dec_nd
+
+    # def decode_1hot_mtx_nd(self,pts_enc_nd,axis=1,returnEncode=False):
+    #     pts_1hot_nd = nd_argmax_1hot(pts_enc_nd,axis=axis)
+    #     pts_dec_nd = self.decode_points_mtx_nd(pts_1hot_nd,axis=axis)
+    #     if(returnEncode):
+    #         return (pts_dec_nd,pts_1hot_nd)
+    #     else:
+    #         return pts_dec_nd
+
+# *****************************
+# ***** Utility functions *****
+# *****************************
+def check_value(inds, val):
+    ''' Check to see if an array is a single element equaling a particular value
+    for pre-processing inputs in a function '''
+    if(np.array(inds).size==1):
+        if(inds==val):
+            return True
+    return False
+
+def na(): # shorthand for new axis
+    return np.newaxis
+
+def flatten_nd_array(pts_nd,axis=1):
+    ''' Flatten an nd array into a 2d array with a certain axis
+    INPUTS
+        pts_nd       N0xN1x...xNd array
+        axis         integer
+    OUTPUTS
+        pts_flt     prod(N \ N_axis) x N_axis array     '''
+    NDIM = pts_nd.ndim
+    SHP = np.array(pts_nd.shape)
+    nax = np.setdiff1d(np.arange(0,NDIM),np.array((axis))) # non axis indices
+    NPTS = np.prod(SHP[nax])
+    axorder = np.concatenate((nax,np.array(axis).flatten()),axis=0)
+    pts_flt = pts_nd.transpose((axorder))
+    pts_flt = pts_flt.reshape(NPTS,SHP[axis])
+    return pts_flt
+
+def unflatten_2d_array(pts_flt,pts_nd,axis=1,squeeze=False):
+    ''' Unflatten a 2d array with a certain axis
+    INPUTS
+        pts_flt     prod(N \ N_axis) x M array
+        pts_nd      N0xN1x...xNd array
+        axis        integer
+        squeeze     bool     if true, M=1, squeeze it out
+    OUTPUTS
+        pts_out     N0xN1x...xNd array        '''
+    NDIM = pts_nd.ndim
+    SHP = np.array(pts_nd.shape)
+    nax = np.setdiff1d(np.arange(0,NDIM),np.array((axis))) # non axis indices
+    NPTS = np.prod(SHP[nax])
+
+    if(squeeze):
+        axorder = nax
+        axorder_rev = np.argsort(axorder)
+        M = pts_flt.shape[1]
+        NEW_SHP = SHP[nax].tolist()
+        # print NEW_SHP
+        # print pts_flt.shape
+        pts_out = pts_flt.reshape(NEW_SHP)
+        pts_out = pts_out.transpose(axorder_rev)
+    else:
+        axorder = np.concatenate((nax,np.array(axis).flatten()),axis=0)
+        axorder_rev = np.argsort(axorder)
+        M = pts_flt.shape[1]
+        NEW_SHP = SHP[nax].tolist()
+        NEW_SHP.append(M)
+        pts_out = pts_flt.reshape(NEW_SHP)
+        pts_out = pts_out.transpose(axorder_rev)
+
+    return pts_out
 
 def load_examples(user_hint = None):
     if not os.path.exists(a.input_dir):
@@ -629,6 +856,9 @@ def main():
     if a.seed is None:
         a.seed = random.randint(0, 2**31 - 1)
 
+    if a.use_bin:
+        i2b_encoder = ImgToRgbBinEncoder(a.num_bin_per_channel)
+
     tf.set_random_seed(a.seed)
     np.random.seed(a.seed)
     random.seed(a.seed)
@@ -675,8 +905,16 @@ def main():
 
     # input_ph = tf.placeholder(tf.float32,shape=examples.inputs.get_shape())
     # target_ph = tf.placeholder(tf.float32,shape=examples.targets.get_shape())
+    if a.use_bin:
+        inputs = tf.placeholder(tf.float32,shape=examples.inputs.get_shape().as_list(), name="inputs")
+        targets = tf.placeholder(tf.float32,shape=examples.targets.get_shape().as_list()[:-1] + [a.num_bin_per_channel ** 3], name="targets_bin")
+        # i2b_encoder.img_to_bin(examples.targets)
+    else:
+        inputs = examples.inputs
+        targets = examples.targets
 
-    model = create_model(examples.inputs, examples.targets)
+
+    model = create_model(inputs, targets)
     # model = create_model(input_ph, target_ph)
 
     def deprocess(image):
@@ -736,23 +974,33 @@ def main():
         deprocessed_targets = deprocess(examples.targets)
 
     with tf.name_scope("deprocess_outputs"):
-        deprocessed_outputs = deprocess(model.outputs)
+        outputs = model.outputs
+        if a.use_bin:
+            # outputs = i2b_encoder.bin_to_img(outputs)
+            deprocessed_outputs = outputs
+        else:
+            deprocessed_outputs = deprocess(outputs)
 
     with tf.name_scope("encode_images"):
+        if a.use_bin:
+            outputs_images = tf.placeholder(tf.float32, shape=[None] + examples.targets.get_shape().as_list()[1:], name='outputs_images')
+            print(outputs_images.get_shape().as_list()) # TODO: delete.
+            deprocessed_outputs_images = deprocess(outputs_images)
+            encoded_outputs = tf.map_fn(tf.image.encode_png, deprocessed_outputs_images, dtype=tf.string, name="encoded_outputs")
         if a.use_hint:
             display_fetches = {
                 "paths": examples.paths,
                 "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                 "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
                 "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
-                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs") if not a.use_bin else deprocessed_outputs, # TODO: change this part to be dependent on use_bin
             }
         else:
             display_fetches = {
                 "paths": examples.paths,
                 "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                 "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
-                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+                "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs") if not a.use_bin else deprocessed_outputs,
 
             }
 
@@ -763,8 +1011,9 @@ def main():
     with tf.name_scope("targets_summary"):
         tf.summary.image("targets", deprocessed_targets)
 
-    with tf.name_scope("outputs_summary"):
-        tf.summary.image("outputs", deprocessed_outputs)
+    if not a.use_bin:
+        with tf.name_scope("outputs_summary"):
+            tf.summary.image("outputs", deprocessed_outputs)
 
     with tf.name_scope("predict_real_summary"):
         tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
@@ -877,6 +1126,13 @@ def main():
                 # print(np.sum(io_results["inputs"][...,1:]))
                 # print(np.sum(io_results["targets"]))
 
+                if a.use_bin:
+
+                    current_inputs, current_targets = sess.run([examples.inputs, examples.targets])
+                    current_targets_bin = i2b_encoder.img_to_bin(current_targets)
+                    feed_dict = {inputs: current_inputs, targets: current_targets_bin}
+                else:
+                    feed_dict = None
 
                 fetches = {
                     "train": model.train,
@@ -904,7 +1160,7 @@ def main():
 
                 # results = sess.run(fetches, options=options, run_metadata=run_metadata,
                 #                    feed_dict={input_ph:io_results["inputs"], target_ph:io_results["targets"]})
-                results = sess.run(fetches, options=options, run_metadata=run_metadata)
+                results = sess.run(fetches, options=options, run_metadata=run_metadata, feed_dict=feed_dict)
 
                 # print(np.sum(results["update_hint"]))
                 # print(np.sum(results["inputs"][...,1:]))
@@ -915,6 +1171,20 @@ def main():
 
                 if should(a.display_freq):
                     print("saving display images")
+
+                    if a.use_bin:
+                        contents = results["display"]["outputs"]
+                        content_images = []
+                        for content_i, content in enumerate(contents):
+                            content_image = i2b_encoder.bin_to_img(content)
+
+                            content_images.append(content_image)
+                        content_images = np.array(content_images, dtype=np.float32)
+                        outputs_images_feed_dict = {outputs_images: content_images}
+                        encoded_content_images, = sess.run([encoded_outputs], feed_dict=outputs_images_feed_dict)
+                        results["display"]["outputs"] = encoded_content_images
+                        # print('encoded images shape: %s' %(str(encoded_images.shape)))
+                        # results["display"]["outputs"] = encoded_images
                     filesets = save_images(results["display"], image_dir, step=results["global_step"])
                     # filesets = save_images(io_results["display"], image_dir, step=results["global_step"])
                     append_index(filesets, step=True)
