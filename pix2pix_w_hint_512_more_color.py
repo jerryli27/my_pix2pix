@@ -361,7 +361,11 @@ class ImgToRgbBinEncoder():
         else:
             rgb_bin_softmax = rgb_bin
 
-        exp_log_z_div_t = tf.exp(tf.divide(tf.log(rgb_bin_softmax),t))
+        # Adding the 0.000001 to prevent potential nan bugs
+        exp_log_z_div_t = tf.exp(tf.divide(tf.log(tf.add(rgb_bin_softmax,0.0000001)),t))
+        # Original
+        # exp_log_z_div_t = tf.exp(tf.divide(tf.log(rgb_bin_softmax),t))
+
         # annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=3, keepdims=True),0.000001)
         # return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=3)
         annealed_mean = exp_log_z_div_t / tf.add(tf.reduce_sum(exp_log_z_div_t, axis=len(rgb_bin.get_shape().as_list()) - 1, keep_dims=True),0.000001)
@@ -1284,6 +1288,9 @@ def main():
                     print("gen_loss_L1", results["gen_loss_L1"])
                     if a.use_sketch_loss:
                         print("gen_loss_sketch", results["gen_loss_sketch"])
+
+                    if math.isnan(results["discrim_loss"]) or math.isnan(results["gen_loss_GAN"]) or math.isnan(results["gen_loss_L1"]):
+                        raise AssertionError("One of the losses became NAN! stopping training.")
 
                 if should(a.save_freq):
                     print("saving model")
