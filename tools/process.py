@@ -13,6 +13,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
 parser.add_argument("--output_dir", required=True, help="output path")
 parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine"])
+parser.add_argument("--image_list_path", help="path to a file containing the path to images under `input-dir`")
 parser.add_argument("--pad", action="store_true", help="pad instead of crop for resize operation")
 parser.add_argument("--size", type=int, default=256, help="size to use for resize operation")
 parser.add_argument("--b_dir", type=str, help="path to folder containing B images for combine operation")
@@ -146,12 +147,18 @@ def find(d):
     # return result
     # This code search for all subdirectories and their subdirectories.
     result = []
-    for path, subdirs, files in os.walk(d):
-        for name in files:
-            full_file_path = os.path.join(path, name)
-            _, ext = os.path.splitext(full_file_path.lower())
-            if ext == ".jpg" or ext == ".png":
-                result.append(full_file_path)
+    if a.image_list_path is not None and os.path.isfile(a.image_list_path):
+        print("Using provided list of images.")
+        with open(a.image_list_path, 'r') as f:
+            for line in f.readlines():
+                result.append(os.path.join(d, line.rstrip("\n")))
+    else:
+        for path, subdirs, files in os.walk(d):
+            for name in files:
+                full_file_path = os.path.join(path, name)
+                _, ext = os.path.splitext(full_file_path.lower())
+                if ext == ".jpg" or ext == ".png":
+                    result.append(full_file_path)
     result.sort()
     return result
 
@@ -289,3 +296,5 @@ def main():
 
 
 main()
+
+"""python tools/process.py --input_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/line/ --output_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train/ --b_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --operation=combine --size=128 --image_list_path=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/images_containing_face.txt --silent --gpu_limit=0.05"""

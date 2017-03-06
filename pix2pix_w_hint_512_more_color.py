@@ -84,7 +84,7 @@ if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
 
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
-T_VALUE = 1.0 # 0.38 in the original paper.
+T_VALUE = 0.38 # 1.0 # 0.38 in the original paper.
 
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
@@ -1176,7 +1176,15 @@ def main():
             # testing
             # run a single epoch over all input data
             for step in range(examples.steps_per_epoch):
-                results = sess.run(display_fetches)
+
+                if a.use_bin:
+                    current_inputs, current_targets = sess.run([examples.inputs, examples.targets])
+                    current_targets_bin = i2b_encoder.img_to_bin(current_targets)
+                    feed_dict = {inputs: current_inputs, targets: current_targets, targets_bin:current_targets_bin}
+                else:
+                    feed_dict = None
+
+                results = sess.run(display_fetches, feed_dict = feed_dict)
                 filesets = save_images(results, image_dir)
                 for i, path in enumerate(results["paths"]):
                     print(step * a.batch_size + i + 1, "evaluated image", os.path.basename(path))

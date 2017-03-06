@@ -79,6 +79,7 @@ if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
 
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
+CLIP_VALUE = 0.05  # 0.01
 
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
@@ -149,6 +150,7 @@ def check_image(image):
 
 # based on https://github.com/torch/image/blob/9f65c30167b2048ecbe8b7befdc6b2d6d12baee9/generic/image.c
 def rgb_to_lab(srgb):
+    # Input range [0, 255]
     with tf.name_scope("rgb_to_lab"):
         srgb = check_image(srgb)
         srgb_pixels = tf.reshape(srgb, [-1, 3])
@@ -190,6 +192,8 @@ def rgb_to_lab(srgb):
 
 
 def lab_to_rgb(lab):
+    # Input range for l is 0 ~ 100 and ab is -110 ~ 110
+    # Output range is 0 ~ 1....???
     with tf.name_scope("lab_to_rgb"):
         lab = check_image(lab)
         lab_pixels = tf.reshape(lab, [-1, 3])
@@ -268,29 +272,40 @@ def load_examples(user_hint = None):
 
         raw_input.set_shape([None, None, 3])
 
+        # break apart image pair and move to range [-1, 1]
+        width = tf.shape(raw_input)[1]  # [height, width, channels]
+
+        # a_images = raw_input[:,:width//2,:] * 2 - 1
+        # b_images = raw_input[:,width//2:,:] * 2 - 1
+
+        # Modified code: change a_images and b_images to 0~1 before turning into grayscale and rescaling.
+        a_images = raw_input[:, :width // 2, :]
+        b_images = raw_input[:, width // 2:, :]
+        if a.gray_input_a:
+            a_images = tf.image.rgb_to_grayscale(a_images)
+        if a.gray_input_b:
+            b_images = tf.image.rgb_to_grayscale(b_images)
+
         if a.lab_colorization:
-            # load color and brightness from image, no B image exists here
-            lab = rgb_to_lab(raw_input)
+            if a.which_direction=="AtoB":
+                lab = rgb_to_lab(b_images)
+            else:
+                lab = rgb_to_lab(a_images)
             L_chan, a_chan, b_chan = tf.unstack(lab, axis=2)
-            a_images = tf.expand_dims(L_chan, axis=2) / 50 - 1 # black and white with input range [0, 100]
-            b_images = tf.stack([a_chan, b_chan], axis=2) / 110 # color channels with input range ~[-110, 110], not exact
+
+            L_chan = tf.expand_dims(L_chan, axis=2) / 50 - 1 # black and white with input range [0, 100]
+            ab_chan = tf.stack([a_chan, b_chan], axis=2) / 110 # color channels with input range ~[-110, 110], not exact
+
+            if a.which_direction=="AtoB":
+                b_images = tf.concat(2,[L_chan, ab_chan])
+                a_images =  a_images * 2 - 1
+            else:
+                a_images = tf.concat(2,[L_chan, ab_chan])
+                b_images = b_images * 2 - 1
         else:
-            # break apart image pair and move to range [-1, 1]
-            width = tf.shape(raw_input)[1] # [height, width, channels]
-
-            # a_images = raw_input[:,:width//2,:] * 2 - 1
-            # b_images = raw_input[:,width//2:,:] * 2 - 1
-
-            # Modified code: change a_images and b_images to 0~1 before turning into grayscale and rescaling.
-            a_images = raw_input[:,:width//2,:]
-            b_images = raw_input[:,width//2:,:]
-            if a.gray_input_a:
-                a_images = tf.image.rgb_to_grayscale(a_images)
-            if a.gray_input_b:
-                b_images = tf.image.rgb_to_grayscale(b_images)
-
             a_images =  a_images * 2 - 1
             b_images = b_images * 2 - 1
+
 
     if a.which_direction == "AtoB":
         inputs, targets = [a_images, b_images]
@@ -488,9 +503,12 @@ def create_model(inputs, targets):
 
         # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
+            # convolved = conv(rectified, out_channels=1, stride=1)
+            # output = tf.sigmoid(convolved)
+            # layers.append(output)
+            # With WGAN, sigmoid for the last layer is no longer needed
             convolved = conv(rectified, out_channels=1, stride=1)
-            output = tf.sigmoid(convolved)
-            layers.append(output)
+            layers.append(convolved)
 
         return layers[-1]
 
@@ -531,15 +549,21 @@ def create_model(inputs, targets):
             # predict_fake = create_discriminator(inputs, outputs)
 
     with tf.name_scope("discriminator_loss"):
-        # minimizing -tf.log will try to get inputs to 1
-        # predict_real => 1
-        # predict_fake => 0
-        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
+        # # minimizing -tf.log will try to get inputs to 1
+        # # predict_real => 1
+        # # predict_fake => 0
+        # discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
+
+        # Use wgan loss
+        discrim_loss = -tf.reduce_mean(predict_real) + tf.reduce_mean(predict_fake)
 
     with tf.name_scope("generator_loss"):
-        # predict_fake => 1
-        # abs(targets - outputs) => 0
-        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+        # # predict_fake => 1
+        # # abs(targets - outputs) => 0
+        # gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+
+        # WGAN loss
+        gen_loss_GAN = -tf.reduce_mean(predict_fake)
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         if a.use_sketch_loss:
             gen_loss_sketch = tf.reduce_mean(tf.abs(fake_sketches - real_sketches))
@@ -549,13 +573,25 @@ def create_model(inputs, targets):
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator")]
-        discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-        discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        # WGAN does not use momentum based optimizer
+        discrim_optim = tf.train.RMSPropOptimizer(a.lr)
+        # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+
+        # WGAN adds a clip and train discriminator 5 times
+        discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        discrim_clips = [var.assign(tf.clip_by_value(var, -CLIP_VALUE, CLIP_VALUE)) for var in discrim_tvars]
+        # No difference between control dependencies and group.
+        # with tf.control_dependencies([discrim_min] + discrim_clips):
+        #     discrim_train = tf.no_op("discrim_train")
+        with tf.control_dependencies([discrim_min]):
+            discrim_train = tf.group(*discrim_clips)
 
     with tf.name_scope("generator_train"):
         with tf.control_dependencies([discrim_train]):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")]
-            gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            gen_optim = tf.train.RMSPropOptimizer(a.lr)
             gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
@@ -690,22 +726,29 @@ def main():
             num_channels = int(image.get_shape()[-1])
             if num_channels == 1:
                 return tf.image.convert_image_dtype((image + 1) / 2, dtype=tf.uint8, saturate=True)
-            elif num_channels == 2:
+            elif num_channels == 3:
                 # (a, b) color channels, convert to rgb
                 # a_chan and b_chan have range [-1, 1] => [-110, 110]
-                a_chan, b_chan = tf.unstack(image * 110, axis=3)
-                # get L_chan from inputs or targets
-                if a.which_direction == "AtoB":
-                    brightness = examples.inputs
-                elif a.which_direction == "BtoA":
-                    brightness = examples.targets
-                else:
-                    raise Exception("invalid direction")
-                # L_chan has range [-1, 1] => [0, 100]
-                L_chan = tf.squeeze((brightness + 1) / 2 * 100, axis=3)
+                L_chan, a_chan, b_chan = tf.unstack(image, axis=3)
+                L_chan = (L_chan + 1) * 50
+                a_chan = a_chan * 110
+                b_chan = b_chan * 110
                 lab = tf.stack([L_chan, a_chan, b_chan], axis=3)
                 rgb = lab_to_rgb(lab)
                 return tf.image.convert_image_dtype(rgb, dtype=tf.uint8, saturate=True)
+            elif num_channels == 4:
+                print('using hint! correct!')
+                # (a, b) color channels, convert to rgb
+                # a_chan and b_chan have range [-1, 1] => [-110, 110]
+                L_chan, a_chan, b_chan, opacity_chan = tf.unstack(image, axis=3)
+                L_chan = (L_chan + 1) * 50
+                a_chan = a_chan * 110
+                b_chan = b_chan * 110
+                lab = tf.stack([L_chan, a_chan, b_chan], axis=3)
+                rgb = lab_to_rgb(lab)
+                opacity_chan = tf.expand_dims((opacity_chan + 1) / 2,3)  # [-1, 1] => [0, 1]
+                rgba = tf.concat(3, (rgb, opacity_chan))
+                return tf.image.convert_image_dtype(rgba, dtype=tf.uint8, saturate=True)
             else:
                 raise Exception("unexpected number of channels")
         else:
@@ -950,20 +993,19 @@ main()
 --mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
 """
 """
-
+# Sanity check
+python pix2pix_w_hint_lab_wgan.py --mode train --output_dir pix2pix_w_hint_lab_wgan_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
 # Train
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_downloaded_128_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_downloaded_512_wgan_w_hint_sketch_loss --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --checkpoint=pixiv_downloaded_512_wgan_w_hint_sketch_loss --from_128
+python pix2pix_w_hint_lab_wgan.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+# Train 512
+python pix2pix_w_hint_lab_wgan.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan --from_128
 # TO train a network that turns colored images into sketches:
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
+
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --train_sketch
 # Test
-python pix2pix_w_hint_512.py --mode test --output_dir pixiv_downloaded_128_wgan_w_hint_sketch_loss_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --checkpoint=pixiv_downloaded_128_wgan_w_hint_sketch_loss
-python pix2pix_w_hint_512.py --mode test --output_dir pixiv_downloaded_128_wgan_w_hint_sketch_loss_test_blank_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --checkpoint=pixiv_downloaded_128_wgan_w_hint_sketch_loss --user_hint_path=BLANK
-# Test 512
-python pix2pix_w_hint_512.py --mode test --output_dir pixiv_downloaded_512_wgan_w_hint_sketch_loss_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --checkpoint=pixiv_downloaded_512_wgan_w_hint_sketch_loss
-python pix2pix_w_hint_512.py --mode test --output_dir pixiv_downloaded_512_wgan_w_hint_sketch_loss_test_blank_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --checkpoint=pixiv_downloaded_512_wgan_w_hint_sketch_loss --user_hint_path=BLANK
-
+python pix2pix_w_hint_lab_wgan.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan
+python pix2pix_w_hint_lab_wgan.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan --user_hint_path=BLANK
 """
 
 """
