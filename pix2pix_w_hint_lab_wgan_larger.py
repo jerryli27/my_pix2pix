@@ -19,7 +19,6 @@ import collections
 import math
 import time
 import urllib
-from sklearn.neighbors import NearestNeighbors
 
 from general_util import imread
 
@@ -70,10 +69,6 @@ parser.add_argument("--use_sketch_loss", dest="use_sketch_loss", action="store_t
                     help="Use the pretrained sketch generator network to compare the sketches of the generated image "
                          "versus that of the original image.")
 parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
-parser.add_argument("--use_bin", dest="use_bin", action="store_true",
-                    help="Output a probability distribution of color bins instead of one single color. It should make "
-                         "the output more colorful.")
-parser.add_argument("--num_bin_per_channel", type=int, default=6, help="number of bins per r, g, b channel")
 
 
 
@@ -81,27 +76,29 @@ a = parser.parse_args()
 
 if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
     parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
-if a.use_bin and a.lab_colorization:
-    raise NotImplementedError
 
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
-CLIP_VALUE = 0.05  # 0.01
-T_VALUE = 0.38 # 1.0 # 0.38 in the original paper.
+CLIP_VALUE = 0.01  # 0.01
+APPROXIMATE_NUMBER_OF_TOTAL_PARAMETERS = 98218176
 
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints")
-Model = collections.namedtuple("Model", "outputs, outputs_bin, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
 
 
-def conv(batch_input, out_channels, stride, trainable=True):
+def conv(batch_input, out_channels, stride, shift=4, pad = 1, trainable=True):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
-        filter = tf.get_variable("filter", [4, 4, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02), trainable=trainable)
+        filter = tf.get_variable("filter", [shift, shift, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02), trainable=trainable)
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
-        padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
+        if pad > 0:
+            padded_input = tf.pad(batch_input, [[0, 0], [pad, pad], [pad, pad], [0, 0]], mode="CONSTANT")
+        else:
+            assert pad == 0
+            padded_input = batch_input
         conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
         return conv
 
@@ -132,13 +129,13 @@ def batchnorm(input, trainable=True):
         return normalized
 
 
-def deconv(batch_input, out_channels, trainable=True):
+def deconv(batch_input, out_channels, stride = 2, shift = 4, trainable=True):
     with tf.variable_scope("deconv"):
         batch, in_height, in_width, in_channels = [int(d) for d in batch_input.get_shape()]
-        filter = tf.get_variable("filter", [4, 4, out_channels, in_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02), trainable=trainable)
+        filter = tf.get_variable("filter", [shift, shift, out_channels, in_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02), trainable=trainable)
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, out_channels, in_channels]
         #     => [batch, out_height, out_width, out_channels]
-        conv = tf.nn.conv2d_transpose(batch_input, filter, [batch, in_height * 2, in_width * 2, out_channels], [1, 2, 2, 1], padding="SAME")
+        conv = tf.nn.conv2d_transpose(batch_input, filter, [batch, in_height * stride, in_width * stride, out_channels], [1, stride, stride, 1], padding="SAME")
         return conv
 
 
@@ -242,282 +239,6 @@ def lab_to_rgb(lab):
 
         return tf.reshape(srgb_pixels, tf.shape(lab))
 
-class ImgToRgbBinEncoder():
-    def __init__(self,bin_num=6):
-        self.bin_num=bin_num
-        index_matrix=  []
-        pixel_max_val = 1.0  # Originally it was 255.0 but for the current program it is different.
-        pixel_min_val = -1.0
-        assert pixel_min_val < pixel_max_val
-        step_size = (pixel_max_val - pixel_min_val) / (bin_num - 1)
-        r, g, b = pixel_min_val, pixel_min_val, pixel_min_val
-        while r <= pixel_max_val:
-            # r_rounded = round(r)
-            g = pixel_min_val
-            while g <= pixel_max_val:
-                # g_rounded = round(g)
-                b = pixel_min_val
-                while b <= pixel_max_val:
-                    # b_rounded = round(b)
-                    # index_matrix.append([r_rounded, g_rounded, b_rounded])
-                    index_matrix.append([r, g, b])
-                    b += step_size
-                g += step_size
-            r += step_size
-        # self.index_matrix = np.array(index_matrix, dtype=np.uint8)
-        self.index_matrix = np.array(index_matrix, dtype=np.float32)
-        # self.nnencode = NNEncode(5,5,cc=self.index_matrix)
-        self.nnencode = NNEncode(5,1.0,cc=self.index_matrix)
-    def img_to_bin(self, img, return_sparse = False):
-
-        """
-
-        :param img:  An image represented in numpy array with shape (batch, height, width, 3)
-        :param bin_num: number of bins for each color dimension
-        :return:  An image represented in numpy array with shape (batch, height, width, bin_num ** 3)
-        """
-        if len(img.shape) != 4 and len(img.shape) != 3:
-            raise AssertionError("The image must have shape (batch, height, width, 3), or (height, width, 3), not %s" %str(img.shape))
-        if len(img.shape) == 4:
-            batch, height, width, num_channel = img.shape
-        else:
-            height, width, num_channel = img.shape
-        if num_channel != 3:
-            raise AssertionError("The image must have 3 channels representing rgb. not %d." %num_channel)
-
-        # nbrs = NearestNeighbors(n_neighbors=5, algorithm='ball_tree').fit(index_matrix)
-        #
-        # img_resized = np.reshape(img, (batch * height * width, num_channel))
-        #
-        # # Shape batch * height * width, 5
-        # distances, indices = nbrs.kneighbors(img_resized)
-        #
-        #
-        #
-        # # In the original paper they used a gaussian kernel with delta = 5.
-        # distances = gaussian_kernel(distances, std=5.0)
-        #
-        # rgb_bin = np.zeros((batch * height * width, bin_num ** 3))
-        #
-        # for bhw in range(batch * height * width):
-        #     for i in range(5):
-        #         rgb_bin[bhw,indices[bhw,i]] = distances[bhw, i]
-        #
-        #
-        # return rgb_bin
-
-        # return self.nnencode.encode_points_mtx_nd(img,axis=3, return_sparse=return_sparse)
-        return self.nnencode.encode_points_mtx_nd(img,axis=len(img.shape)-1, return_sparse=return_sparse)
-
-
-
-    def bin_to_img(self, rgb_bin, t = 0.01, do_softmax = True):
-        """
-        This function uses annealed-mean technique in the paper.
-        :param rgb_bin:
-        :param t: t = 0.38 in the original paper
-        """
-
-        if len(rgb_bin.shape) != 4 and len(rgb_bin.shape) != 3:
-            raise AssertionError("The rgb_bin must have shape (batch, height, width, 3), or (height, width, 3), not %s" %str(rgb_bin.shape))
-        if len(rgb_bin.shape) == 4:
-            batch, height, width, num_channel = rgb_bin.shape
-        else:
-            height, width, num_channel = rgb_bin.shape
-        if num_channel != self.bin_num**3:
-            raise AssertionError("The rgb_bin must have bin_num**3 channels, not %d." % num_channel)
-        # This is not the correct way to normalize. The correct way is to just apply a softmax...
-        # rgb_bin_normalized = rgb_bin/np.sum(rgb_bin,axis=3,keepdims=True)
-        if do_softmax:
-            rgb_bin_exp = np.exp(rgb_bin)
-            # rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=3,keepdims=True)
-            rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=len(rgb_bin.shape) - 1,keepdims=True)
-        else:
-            rgb_bin_softmax = rgb_bin
-
-        exp_log_z_div_t = np.exp(np.divide(np.log(rgb_bin_softmax),t))
-        # annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=3, keepdims=True),0.000001)
-        # return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=3)
-        annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=len(rgb_bin.shape) - 1, keepdims=True),0.000001)
-        return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=len(rgb_bin.shape) - 1)
-
-
-
-    def bin_to_img_tf(self, rgb_bin, t = 0.01, do_softmax = True):
-        """
-        This function uses annealed-mean technique in the paper.
-        :param rgb_bin:
-        :param t: t = 0.38 in the original paper
-        """
-
-        if len(rgb_bin.get_shape().as_list()) != 4 and len(rgb_bin.get_shape().as_list()) != 3:
-            raise AssertionError("The rgb_bin must have shape (batch, height, width, 3), or (height, width, 3), not %s" %str(rgb_bin.get_shape().as_list()))
-        if len(rgb_bin.get_shape().as_list()) == 4:
-            batch, height, width, num_channel = rgb_bin.get_shape().as_list()
-        else:
-            height, width, num_channel = rgb_bin.get_shape().as_list()
-        if num_channel != self.bin_num**3:
-            raise AssertionError("The rgb_bin must have bin_num**3 channels, not %d." % num_channel)
-        # This is not the correct way to normalize. The correct way is to just apply a softmax...
-        # rgb_bin_normalized = rgb_bin/np.sum(rgb_bin,axis=3,keepdims=True)
-        if do_softmax:
-            rgb_bin_softmax = tf.nn.softmax(rgb_bin, name='rgb_bin_softmax')
-            # rgb_bin_exp = tf.exp(rgb_bin, name='rgb_bin_exp')
-            # # rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=3,keepdims=True)
-            # rgb_bin_softmax = rgb_bin_exp / np.sum(rgb_bin_exp, axis=len(rgb_bin.get_shape().as_list()) - 1,keepdims=True)
-        else:
-            rgb_bin_softmax = rgb_bin
-
-        # Adding the 0.000001 to prevent potential nan bugs
-        exp_log_z_div_t = tf.exp(tf.divide(tf.log(tf.add(rgb_bin_softmax,0.0000001)),t))
-        # Original
-        # exp_log_z_div_t = tf.exp(tf.divide(tf.log(rgb_bin_softmax),t))
-
-        # annealed_mean = exp_log_z_div_t / np.add(np.sum(exp_log_z_div_t, axis=3, keepdims=True),0.000001)
-        # return self.nnencode.decode_points_mtx_nd(annealed_mean, axis=3)
-        annealed_mean = exp_log_z_div_t / tf.add(tf.reduce_sum(exp_log_z_div_t, axis=len(rgb_bin.get_shape().as_list()) - 1, keep_dims=True),0.000001)
-        return self.nnencode.decode_points_mtx_nd_tf(annealed_mean)
-
-
-    def gaussian_kernel(self,arr,std):
-        return np.exp(-arr**2 / (2 * std**2))
-
-class NNEncode():
-    ''' Encode points using NN search and Gaussian kernel '''
-    def __init__(self,NN,sigma,km_filepath='',cc=-1):
-        if(check_value(cc,-1)):
-            self.cc = np.load(km_filepath)
-        else:
-            self.cc = cc
-        self.K = self.cc.shape[0]
-        self.NN = int(NN)
-        self.sigma = sigma
-        self.nbrs = NearestNeighbors(n_neighbors=NN, algorithm='ball_tree').fit(self.cc)
-        self.closest_neighbor = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(self.cc)
-
-        self.alreadyUsed = False
-
-    def encode_points_mtx_nd(self,pts_nd,axis=1,return_sparse=False,sameBlock=True):
-        pts_flt = flatten_nd_array(pts_nd,axis=axis)
-        P = pts_flt.shape[0]
-        if(sameBlock and self.alreadyUsed):
-            self.pts_enc_flt[...] = 0 # already pre-allocated
-        else:
-            self.alreadyUsed = True
-            self.pts_enc_flt = np.zeros((P,self.K))
-            self.p_inds = np.arange(0,P,dtype='int')[:,na()]
-
-        P = pts_flt.shape[0]
-
-        if return_sparse:
-            (dists, inds) = self.nbrs.closest_neighbor(pts_flt)
-        else:
-            (dists,inds) = self.nbrs.kneighbors(pts_flt)
-
-        # This is reweighing each color bin based on their distance to the point.
-        # THIS IS WHAT I ADDED TO PREVENT NAN LOSS ERROR... DON"T KNOW WHERE THE ERROR CAME FROM,
-        dists[dists > 2.0] = 2.0
-        dists[dists < -2.0] = -2.0
-
-
-        wts = np.exp(-dists**2/(2*self.sigma**2))
-        wts = wts/np.sum(wts,axis=1)[:,na()]
-        np.testing.assert_equal(np.isnan(wts).any(),False)
-
-        self.pts_enc_flt[self.p_inds,inds] = wts
-        pts_enc_nd = unflatten_2d_array(self.pts_enc_flt,pts_nd,axis=axis)
-
-        return pts_enc_nd
-
-    def decode_points_mtx_nd(self,pts_enc_nd,axis=1):
-        pts_enc_flt = flatten_nd_array(pts_enc_nd,axis=axis)
-        pts_dec_flt = np.dot(pts_enc_flt,self.cc)
-        pts_dec_nd = unflatten_2d_array(pts_dec_flt,pts_enc_nd,axis=axis)
-        return pts_dec_nd
-
-    def decode_points_mtx_nd_tf(self,pts_enc_nd,axis=-1):
-        assert axis == -1
-        input_shape = pts_enc_nd.get_shape().as_list()
-        pts_enc_flt = tf.reshape(pts_enc_nd,[-1, input_shape[-1]])
-        pts_dec_flt = tf.matmul(pts_enc_flt,self.cc)
-        pts_dec_nd = tf.reshape(pts_dec_flt, input_shape[:-1] + [-1])
-        return pts_dec_nd
-
-    # def decode_1hot_mtx_nd(self,pts_enc_nd,axis=1,returnEncode=False):
-    #     pts_1hot_nd = nd_argmax_1hot(pts_enc_nd,axis=axis)
-    #     pts_dec_nd = self.decode_points_mtx_nd(pts_1hot_nd,axis=axis)
-    #     if(returnEncode):
-    #         return (pts_dec_nd,pts_1hot_nd)
-    #     else:
-    #         return pts_dec_nd
-
-# *****************************
-# ***** Utility functions *****
-# *****************************
-def check_value(inds, val):
-    ''' Check to see if an array is a single element equaling a particular value
-    for pre-processing inputs in a function '''
-    if(np.array(inds).size==1):
-        if(inds==val):
-            return True
-    return False
-
-def na(): # shorthand for new axis
-    return np.newaxis
-
-def flatten_nd_array(pts_nd,axis=1):
-    ''' Flatten an nd array into a 2d array with a certain axis
-    INPUTS
-        pts_nd       N0xN1x...xNd array
-        axis         integer
-    OUTPUTS
-        pts_flt     prod(N \ N_axis) x N_axis array     '''
-    NDIM = pts_nd.ndim
-    SHP = np.array(pts_nd.shape)
-    nax = np.setdiff1d(np.arange(0,NDIM),np.array((axis))) # non axis indices
-    NPTS = np.prod(SHP[nax])
-    axorder = np.concatenate((nax,np.array(axis).flatten()),axis=0)
-    pts_flt = pts_nd.transpose((axorder))
-    pts_flt = pts_flt.reshape(NPTS,SHP[axis])
-    return pts_flt
-
-def unflatten_2d_array(pts_flt,pts_nd,axis=1,squeeze=False):
-    ''' Unflatten a 2d array with a certain axis
-    INPUTS
-        pts_flt     prod(N \ N_axis) x M array
-        pts_nd      N0xN1x...xNd array
-        axis        integer
-        squeeze     bool     if true, M=1, squeeze it out
-    OUTPUTS
-        pts_out     N0xN1x...xNd array        '''
-    NDIM = pts_nd.ndim
-    SHP = np.array(pts_nd.shape)
-    nax = np.setdiff1d(np.arange(0,NDIM),np.array((axis))) # non axis indices
-    NPTS = np.prod(SHP[nax])
-
-    if(squeeze):
-        axorder = nax
-        axorder_rev = np.argsort(axorder)
-        M = pts_flt.shape[1]
-        NEW_SHP = SHP[nax].tolist()
-        # print NEW_SHP
-        # print pts_flt.shape
-        pts_out = pts_flt.reshape(NEW_SHP)
-        pts_out = pts_out.transpose(axorder_rev)
-    else:
-        axorder = np.concatenate((nax,np.array(axis).flatten()),axis=0)
-        axorder_rev = np.argsort(axorder)
-        M = pts_flt.shape[1]
-        NEW_SHP = SHP[nax].tolist()
-        NEW_SHP.append(M)
-        pts_out = pts_flt.reshape(NEW_SHP)
-        pts_out = pts_out.transpose(axorder_rev)
-
-    return pts_out
-
-# TODO: UGLY CODE BUT WORKS FOR NOW
-if a.use_bin:
-    i2b_encoder = ImgToRgbBinEncoder(a.num_bin_per_channel)
 
 def load_examples(user_hint = None):
     if not os.path.exists(a.input_dir):
@@ -672,8 +393,123 @@ def load_examples(user_hint = None):
     )
 
 
-def create_model(inputs, targets, targets_bin = None):
+def create_model(inputs, targets):
     def create_generator(generator_inputs, generator_outputs_channels, trainable = True):
+        layers = []
+
+        # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+        with tf.variable_scope("encoder_1"):
+            # output = conv(generator_inputs, a.ngf, stride=2, trainable=trainable)
+            output = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
+            layers.append(output)
+
+        layer_specs = [
+            a.ngf * 2, # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
+            a.ngf * 2, # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
+            a.ngf * 4, # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
+            a.ngf * 4, # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
+            a.ngf * 8, # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ngf * 8, # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
+            a.ngf * 16, # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
+            a.ngf * 16, # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
+        ]
+        #
+        #  layer_specs = [
+        #     a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
+        #     a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
+        #     a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
+        #     a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+        #     a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+        #     a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+        # ]
+        for out_channels in layer_specs:
+            with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+                rectified = lrelu(layers[-1], 0.2)
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(rectified, out_channels, stride=2, shift=4, trainable=trainable)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(rectified, out_channels, stride=1, shift=3, trainable=trainable)
+                output = batchnorm(convolved)
+                layers.append(output)
+        # for out_channels in layer_specs:
+        #     with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+        #         rectified = lrelu(layers[-1], 0.2)
+        #         # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+        #         convolved = conv(rectified, out_channels, stride=2, trainable=trainable)
+        #         output = batchnorm(convolved, trainable=trainable)
+        #         layers.append(output)
+
+        layer_specs = [
+            (a.ngf * 16, 0.5),   # decoder_8: [batch, 16, 16, ngf * 16 * 2]=> [batch, 32, 32, ngf * 16]
+            (a.ngf * 8, 0.5),   # decoder_7: [batch, 32, 32, ngf * 16] => [batch, 32, 32, ngf * 8]
+            (a.ngf * 8, 0.5),   # decoder_6: [batch, 32, 32, ngf * 8 * 2] => [batch, 64, 64, ngf * 8]
+            (a.ngf * 4, 0.0),   # decoder_5: [batch, 64, 64, ngf * 8] => [batch, 64, 64, ngf * 4]
+            (a.ngf * 4, 0.0),   # decoder_4: [batch, 64, 64, ngf * 4 * 2] => [batch, 128, 128, ngf * 4]
+            (a.ngf * 2, 0.0),   # decoder_3: [batch, 128, 128, ngf * 4] => [batch, 128, 128, ngf * 2]
+            (a.ngf * 2, 0.0),       # decoder_2: [batch, 128, 128, ngf * 2 * 2] => [batch, 256, 256, ngf * 2]
+            (a.ngf * 1, 0.0),                 # decoder_1: [batch, 256, 256, ngf * 2] => [batch, 256, 256, ngf]
+        ]
+        # layer_specs = [
+        #     (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+        #     (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+        #     (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+        #     (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+        #     (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+        #     (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+        # ]
+        num_encoder_layers = len(layers)
+        for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
+            skip_layer = num_encoder_layers - decoder_layer - 1
+            with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
+                if decoder_layer % 2 != 0:
+                    # first decoder layer doesn't have skip connections
+                    # since it is directly connected to the skip_layer
+                    input = layers[-1]
+                    rectified = tf.nn.relu(input)
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    output = deconv(rectified, out_channels, 1, 3, trainable=trainable)
+                else:
+                    # Can't find concat_v2 so commenting this out.
+                    #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
+                    input = tf.concat(3, [layers[-1], layers[skip_layer]])
+
+                    rectified = tf.nn.relu(input)
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                    output = deconv(rectified, out_channels, 2, 4, trainable=trainable)
+                # if decoder_layer == 0:
+                #     # first decoder layer doesn't have skip connections
+                #     # since it is directly connected to the skip_layer
+                #     input = layers[-1]
+                # else:
+                #     # Can't find concat_v2 so commenting this out.
+                #     #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
+                #     input = tf.concat(3, [layers[-1], layers[skip_layer]])
+                #
+                # rectified = tf.nn.relu(input)
+                # # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                # output = deconv(rectified, out_channels, trainable=trainable)
+                output = batchnorm(output, trainable=trainable)
+
+                if dropout > 0.0:
+                    output = tf.nn.dropout(output, keep_prob=1 - dropout)
+
+                layers.append(output)
+
+        # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
+        with tf.variable_scope("decoder_1"):
+            #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
+            input = tf.concat(3,[layers[-1], layers[0]])
+            rectified = tf.nn.relu(input)
+            output = deconv(rectified, generator_outputs_channels, 1, 3, trainable=trainable)
+            output = tf.tanh(output)
+            layers.append(output)
+
+        return layers[-1]
+
+
+    def create_sketch_generator(generator_inputs, generator_outputs_channels, trainable = True):
         layers = []
 
         # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
@@ -754,8 +590,7 @@ def create_model(inputs, targets, targets_bin = None):
             input = tf.concat(3,[layers[-1], layers[0]])
             rectified = tf.nn.relu(input)
             output = deconv(rectified, generator_outputs_channels, trainable=trainable)
-            if not a.use_bin:
-                output = tf.tanh(output)
+            output = tf.tanh(output)
             layers.append(output)
 
         return layers[-1]
@@ -770,21 +605,44 @@ def create_model(inputs, targets, targets_bin = None):
 
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
-            convolved = conv(input, a.ndf, stride=2)
+            # convolved = conv(input, a.ndf, stride=2)
+            convolved = conv(input, a.ndf, stride=1, shift=3)
             rectified = lrelu(convolved, 0.2)
             layers.append(rectified)
 
         # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
         # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
         # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
-        for i in range(n_layers):
+        layer_specs = [
+            a.ndf * 2,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
+            a.ndf * 2,  # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
+            a.ndf * 4,  # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
+            a.ndf * 4,  # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
+            a.ndf * 8,  # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ndf * 8,  # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
+            a.ndf * 16,  # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
+            a.ndf * 16,  # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
+        ]
+        for out_channels in layer_specs:
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-                out_channels = a.ndf * min(2**(i+1), 8)
-                stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
-                convolved = conv(layers[-1], out_channels, stride=stride)
-                normalized = batchnorm(convolved)
-                rectified = lrelu(normalized, 0.2)
+                normed = batchnorm(layers[-1])
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(normed, out_channels, stride=2, shift=4)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(normed, out_channels, stride=1, shift=3)
+
+                rectified = lrelu(convolved, 0.2)
                 layers.append(rectified)
+        # for i in range(n_layers):
+        #     with tf.variable_scope("layer_%d" % (len(layers) + 1)):
+        #         out_channels = a.ndf * min(2**(i+1), 8)
+        #         stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
+        #         convolved = conv(layers[-1], out_channels, stride=stride)
+        #         normalized = batchnorm(convolved)
+        #         rectified = lrelu(normalized, 0.2)
+        #         layers.append(rectified)
 
         # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
@@ -792,26 +650,20 @@ def create_model(inputs, targets, targets_bin = None):
             # output = tf.sigmoid(convolved)
             # layers.append(output)
             # With WGAN, sigmoid for the last layer is no longer needed
-            convolved = conv(rectified, out_channels=1, stride=1)
+            convolved = conv(rectified, out_channels=1, stride=1, shift=3)
             layers.append(convolved)
 
         return layers[-1]
 
     with tf.variable_scope("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-        out_channels = int(targets.get_shape()[-1]) if not a.use_bin else int(targets_bin.get_shape()[-1])
-        if a.use_bin:
-
-            outputs_bin = create_generator(inputs, out_channels)
-            # Lastly we need to decode it back into rgb.
-            outputs = i2b_encoder.bin_to_img_tf(outputs_bin, T_VALUE)
-        else:
-            outputs = create_generator(inputs, out_channels)
+        out_channels = int(targets.get_shape()[-1])
+        outputs = create_generator(inputs, out_channels) if not a.train_sketch else create_sketch_generator(inputs, out_channels)
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            fake_sketches = create_generator(outputs, 1, trainable=False)
+            fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            real_sketches = create_generator(targets, 1, trainable=False)
+            real_sketches = create_sketch_generator(targets, 1, trainable=False)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -821,7 +673,6 @@ def create_model(inputs, targets, targets_bin = None):
             if a.use_hint:
                 print("creating discr without hint. FOR NOW")
                 print(inputs[...,:1].get_shape().as_list())
-                print("output shape: %s" %str(outputs.get_shape().as_list()))
                 predict_real = create_discriminator(inputs[...,:1], targets)
             else:
                 predict_real = create_discriminator(inputs, targets)
@@ -856,11 +707,7 @@ def create_model(inputs, targets, targets_bin = None):
 
         # WGAN loss
         gen_loss_GAN = -tf.reduce_mean(predict_fake)
-        # gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        if a.use_bin:
-            gen_loss_L1 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(outputs_bin, targets_bin))
-        else:
-            gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         if a.use_sketch_loss:
             gen_loss_sketch = tf.reduce_mean(tf.abs(fake_sketches - real_sketches))
             gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight + gen_loss_sketch * a.sketch_weight
@@ -907,7 +754,6 @@ def create_model(inputs, targets, targets_bin = None):
         gen_loss_L1=ema.average(gen_loss_L1),
         gen_loss_sketch=ema.average(gen_loss_sketch) if a.use_sketch_loss else None,
         outputs=outputs,
-        outputs_bin=outputs_bin if a.use_bin else None,
         train=tf.group(update_losses, incr_global_step, gen_train),
     )
 
@@ -1008,15 +854,6 @@ def main():
 
     # input_ph = tf.placeholder(tf.float32,shape=examples.inputs.get_shape())
     # target_ph = tf.placeholder(tf.float32,shape=examples.targets.get_shape())
-    if a.use_bin:
-        inputs = tf.placeholder(tf.float32,shape=examples.inputs.get_shape().as_list(), name="inputs")
-        targets = tf.placeholder(tf.float32,shape=examples.targets.get_shape().as_list(), name="targets")
-        targets_bin = tf.placeholder(tf.float32,shape=examples.targets.get_shape().as_list()[:-1] + [a.num_bin_per_channel ** 3], name="targets_bin")
-        # i2b_encoder.img_to_bin(examples.targets)
-    else:
-        inputs = examples.inputs
-        targets = examples.targets
-        targets_bin = None
 
     model = create_model(examples.inputs, examples.targets)
     # model = create_model(input_ph, target_ph)
@@ -1074,25 +911,15 @@ def main():
 
     # reverse any processing on images so they can be written to disk or displayed to user
     with tf.name_scope("deprocess_inputs"):
-        if a.use_bin:
-            if a.use_hint:
-                deprocessed_inputs = deprocess(inputs[...,:1])
-                deprocessed_hints = deprocess(inputs[...,1:])
-            else:
-                deprocessed_inputs = deprocess(inputs)
+        if a.use_hint:
+            deprocessed_inputs = deprocess(examples.inputs[...,:1])
+            deprocessed_hints = deprocess(examples.inputs[...,1:])
         else:
-            if a.use_hint:
-                deprocessed_inputs = deprocess(examples.inputs[...,:1])
-                deprocessed_hints = deprocess(examples.inputs[...,1:])
-            else:
-                deprocessed_inputs = deprocess(examples.inputs)
+            deprocessed_inputs = deprocess(examples.inputs)
 
 
     with tf.name_scope("deprocess_targets"):
-        if a.use_bin:
-            deprocessed_targets = deprocess(targets)
-        else:
-            deprocessed_targets = deprocess(examples.targets)
+        deprocessed_targets = deprocess(examples.targets)
 
     with tf.name_scope("deprocess_outputs"):
         deprocessed_outputs = deprocess(model.outputs)
@@ -1112,6 +939,7 @@ def main():
                 "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                 "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                 "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+
             }
 
     # summaries
@@ -1122,7 +950,6 @@ def main():
         tf.summary.image("targets", deprocessed_targets)
 
     with tf.name_scope("outputs_summary"):
-        # raise NotImplementedError("TODO: deprocessed_outputs does not have the correct number of channels when use_bin is on. Maybe replace that with a placeholder instead?")
         tf.summary.image("outputs", deprocessed_outputs)
 
     with tf.name_scope("predict_real_summary"):
@@ -1166,7 +993,7 @@ def main():
             saver.save(sess,checkpoint)
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        if a.use_sketch_loss: #and a.checkpoint is None:
+        if a.use_sketch_loss: # and a.checkpoint is None:
             sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
             # This is a sanity check to make sure sketch variables are not trainable.
             assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
@@ -1201,15 +1028,7 @@ def main():
             # testing
             # run a single epoch over all input data
             for step in range(examples.steps_per_epoch):
-                if a.use_bin:
-                    current_inputs, current_targets = sess.run([examples.inputs, examples.targets])
-                    current_targets_bin = i2b_encoder.img_to_bin(current_targets)
-                    feed_dict = {inputs: current_inputs, targets: current_targets, targets_bin:current_targets_bin}
-                else:
-                    feed_dict = None
-
-                results = sess.run(display_fetches, feed_dict = feed_dict)
-                # results = sess.run(display_fetches)
+                results = sess.run(display_fetches)
                 filesets = save_images(results, image_dir)
                 for i, path in enumerate(results["paths"]):
                     print(step * a.batch_size + i + 1, "evaluated image", os.path.basename(path))
@@ -1247,12 +1066,6 @@ def main():
                 # print(np.sum(io_results["inputs"][...,1:]))
                 # print(np.sum(io_results["targets"]))
 
-                if a.use_bin:
-                    current_inputs, current_targets = sess.run([examples.inputs, examples.targets])
-                    current_targets_bin = i2b_encoder.img_to_bin(current_targets)
-                    feed_dict = {inputs: current_inputs, targets: current_targets, targets_bin:current_targets_bin}
-                else:
-                    feed_dict = None
 
                 fetches = {
                     "train": model.train,
@@ -1280,8 +1093,7 @@ def main():
 
                 # results = sess.run(fetches, options=options, run_metadata=run_metadata,
                 #                    feed_dict={input_ph:io_results["inputs"], target_ph:io_results["targets"]})
-                # results = sess.run(fetches, options=options, run_metadata=run_metadata)
-                results = sess.run(fetches, options=options, run_metadata=run_metadata, feed_dict=feed_dict)
+                results = sess.run(fetches, options=options, run_metadata=run_metadata)
 
                 # print(np.sum(results["update_hint"]))
                 # print(np.sum(results["inputs"][...,1:]))
@@ -1309,9 +1121,6 @@ def main():
                     if a.use_sketch_loss:
                         print("gen_loss_sketch", results["gen_loss_sketch"])
 
-                    if math.isnan(results["discrim_loss"]) or math.isnan(results["gen_loss_GAN"]) or math.isnan(results["gen_loss_L1"]):
-                        raise AssertionError("One of the losses became NAN! stopping training.")
-
                 if should(a.save_freq):
                     print("saving model")
                     saver.save(sess, os.path.join(a.output_dir, "model"), global_step=sv.global_step)
@@ -1328,18 +1137,18 @@ main()
 """
 """
 # Sanity check
-python pix2pix_w_hint_lab_wgan.py --mode train --output_dir pix2pix_w_hint_lab_wgan_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
 # Train
-python pix2pix_w_hint_lab_wgan.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.7 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
 # Train 512
-python pix2pix_w_hint_lab_wgan.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan --from_128
+python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger --from_128
 # TO train a network that turns colored images into sketches:
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
 
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --train_sketch
 # Test
-python pix2pix_w_hint_lab_wgan.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan
-python pix2pix_w_hint_lab_wgan.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger
+python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
 """
 
 """
