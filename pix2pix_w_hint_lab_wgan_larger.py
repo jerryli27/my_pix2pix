@@ -48,8 +48,8 @@ parser.add_argument("--gray_input_b", action="store_true", help="Treat B image a
 parser.add_argument("--use_hint", action="store_true", help="Supply hints to input. Training dimension 1 -> 4.")
 parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
-parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
-parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
+parser.add_argument("--ngf", type=int, default=32, help="number of generator filters in first conv layer")
+parser.add_argument("--ndf", type=int, default=32, help="number of discriminator filters in first conv layer")
 parser.add_argument("--scale_size", type=int, default= 572,# 286,
                     help="scale images to this size before cropping to `CROP_SIZE`x`CROP_SIZE`")
 parser.add_argument("--crop_size", type=int, default= 512,
@@ -76,6 +76,8 @@ a = parser.parse_args()
 
 if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
     parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
+if a.sketch_weight != 10.0:
+    raw_input("Are you sure you don't want sketch_weight to be 10.0?")
 
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
@@ -400,8 +402,13 @@ def create_model(inputs, targets):
         # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
         with tf.variable_scope("encoder_1"):
             # output = conv(generator_inputs, a.ngf, stride=2, trainable=trainable)
-            output = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            layers.append(output)
+            # output = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
+            # layers.append(output)
+            convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
+            output = batchnorm(convolved)
+            # rectified = lrelu(output, 0.2)
+            rectified = tf.nn.relu(output)
+            layers.append(rectified)
 
         layer_specs = [
             a.ngf * 2, # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
@@ -424,15 +431,16 @@ def create_model(inputs, targets):
         # ]
         for out_channels in layer_specs:
             with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-                rectified = lrelu(layers[-1], 0.2)
+                # rectified = lrelu(layers[-1], 0.2)
                 if (len(layers) + 1) % 2 == 0:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                    convolved = conv(rectified, out_channels, stride=2, shift=4, trainable=trainable)
+                    convolved = conv(layers[-1], out_channels, stride=2, shift=4, trainable=trainable)
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                    convolved = conv(rectified, out_channels, stride=1, shift=3, trainable=trainable)
+                    convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
                 output = batchnorm(convolved)
-                layers.append(output)
+                rectified = tf.nn.relu(output)
+                layers.append(rectified)
         # for out_channels in layer_specs:
         #     with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
         #         rectified = lrelu(layers[-1], 0.2)
@@ -442,14 +450,14 @@ def create_model(inputs, targets):
         #         layers.append(output)
 
         layer_specs = [
-            (a.ngf * 16, 0.5),   # decoder_8: [batch, 16, 16, ngf * 16 * 2]=> [batch, 32, 32, ngf * 16]
-            (a.ngf * 8, 0.5),   # decoder_7: [batch, 32, 32, ngf * 16] => [batch, 32, 32, ngf * 8]
-            (a.ngf * 8, 0.5),   # decoder_6: [batch, 32, 32, ngf * 8 * 2] => [batch, 64, 64, ngf * 8]
-            (a.ngf * 4, 0.0),   # decoder_5: [batch, 64, 64, ngf * 8] => [batch, 64, 64, ngf * 4]
-            (a.ngf * 4, 0.0),   # decoder_4: [batch, 64, 64, ngf * 4 * 2] => [batch, 128, 128, ngf * 4]
-            (a.ngf * 2, 0.0),   # decoder_3: [batch, 128, 128, ngf * 4] => [batch, 128, 128, ngf * 2]
-            (a.ngf * 2, 0.0),       # decoder_2: [batch, 128, 128, ngf * 2 * 2] => [batch, 256, 256, ngf * 2]
-            (a.ngf * 1, 0.0),                 # decoder_1: [batch, 256, 256, ngf * 2] => [batch, 256, 256, ngf]
+            (a.ngf * 16),   # decoder_8: [batch, 16, 16, ngf * 16 * 2]=> [batch, 32, 32, ngf * 16]
+            (a.ngf * 8),   # decoder_7: [batch, 32, 32, ngf * 16] => [batch, 32, 32, ngf * 8]
+            (a.ngf * 8),   # decoder_6: [batch, 32, 32, ngf * 8 * 2] => [batch, 64, 64, ngf * 8]
+            (a.ngf * 4),   # decoder_5: [batch, 64, 64, ngf * 8] => [batch, 64, 64, ngf * 4]
+            (a.ngf * 4),   # decoder_4: [batch, 64, 64, ngf * 4 * 2] => [batch, 128, 128, ngf * 4]
+            (a.ngf * 2),   # decoder_3: [batch, 128, 128, ngf * 4] => [batch, 128, 128, ngf * 2]
+            (a.ngf * 2),       # decoder_2: [batch, 128, 128, ngf * 2 * 2] => [batch, 256, 256, ngf * 2]
+            (a.ngf * 1),                 # decoder_1: [batch, 256, 256, ngf * 2] => [batch, 256, 256, ngf]
         ]
         # layer_specs = [
         #     (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
@@ -460,24 +468,24 @@ def create_model(inputs, targets):
         #     (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
         # ]
         num_encoder_layers = len(layers)
-        for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
+        for decoder_layer, (out_channels) in enumerate(layer_specs):
             skip_layer = num_encoder_layers - decoder_layer - 1
             with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
                 if decoder_layer % 2 != 0:
                     # first decoder layer doesn't have skip connections
                     # since it is directly connected to the skip_layer
                     input = layers[-1]
-                    rectified = tf.nn.relu(input)
                     # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
-                    output = deconv(rectified, out_channels, 1, 3, trainable=trainable)
+                    output = deconv(input, out_channels, 1, 3, trainable=trainable)
                 else:
                     # Can't find concat_v2 so commenting this out.
                     #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
-                    input = tf.concat(3, [layers[-1], layers[skip_layer]])
-
-                    rectified = tf.nn.relu(input)
+                    if decoder_layer == 0:
+                        input = tf.concat(3, [layers[-1], layers[-2]])
+                    else:
+                        input = tf.concat(3, [layers[-1], layers[skip_layer]])
                     # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-                    output = deconv(rectified, out_channels, 2, 4, trainable=trainable)
+                    output = deconv(input, out_channels, 2, 4, trainable=trainable)
                 # if decoder_layer == 0:
                 #     # first decoder layer doesn't have skip connections
                 #     # since it is directly connected to the skip_layer
@@ -491,19 +499,18 @@ def create_model(inputs, targets):
                 # # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
                 # output = deconv(rectified, out_channels, trainable=trainable)
                 output = batchnorm(output, trainable=trainable)
-
-                if dropout > 0.0:
-                    output = tf.nn.dropout(output, keep_prob=1 - dropout)
-
+                #
+                # if dropout > 0.0:
+                #     output = tf.nn.dropout(output, keep_prob=1 - dropout)
+                output = tf.nn.relu(output)
                 layers.append(output)
 
         # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
         with tf.variable_scope("decoder_1"):
             #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
             input = tf.concat(3,[layers[-1], layers[0]])
-            rectified = tf.nn.relu(input)
-            output = deconv(rectified, generator_outputs_channels, 1, 3, trainable=trainable)
-            output = tf.tanh(output)
+            output = deconv(input, generator_outputs_channels, 1, 3, trainable=trainable)
+            # output = tf.tanh(output)
             layers.append(output)
 
         return layers[-1]
@@ -606,34 +613,34 @@ def create_model(inputs, targets):
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
             # convolved = conv(input, a.ndf, stride=2)
-            convolved = conv(input, a.ndf, stride=1, shift=3)
-            rectified = lrelu(convolved, 0.2)
+            convolved = conv(input, a.ndf, stride=2, shift=4)
+            normed = batchnorm(convolved)
+            rectified = lrelu(normed, 0.2)
             layers.append(rectified)
 
         # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
         # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
         # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
         layer_specs = [
+            a.ndf,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
             a.ndf * 2,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
             a.ndf * 2,  # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
             a.ndf * 4,  # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
             a.ndf * 4,  # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
             a.ndf * 8,  # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
-            a.ndf * 8,  # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
-            a.ndf * 16,  # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
-            a.ndf * 16,  # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
         ]
         for out_channels in layer_specs:
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-                normed = batchnorm(layers[-1])
                 if (len(layers) + 1) % 2 == 0:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                    convolved = conv(normed, out_channels, stride=2, shift=4)
+                    convolved = conv(layers[-1], out_channels, stride=1, shift=3)
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                    convolved = conv(normed, out_channels, stride=1, shift=3)
+                    convolved = conv(layers[-1], out_channels, stride=2, shift=4)
 
-                rectified = lrelu(convolved, 0.2)
+                normed = batchnorm(convolved)
+                # rectified = lrelu(normed, 0.2)
+                rectified = tf.nn.relu(normed)
                 layers.append(rectified)
         # for i in range(n_layers):
         #     with tf.variable_scope("layer_%d" % (len(layers) + 1)):
@@ -1139,7 +1146,7 @@ main()
 # Sanity check
 python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
 # Train
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.7 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
 # Train 512
 python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger --from_128
 # TO train a network that turns colored images into sketches:
