@@ -1,3 +1,7 @@
+"""
+This file is for preprocessing a list of sketch-colored image pairs.
+"""
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -13,7 +17,7 @@ from PIL import ImageStat, Image
 from shutil import copy
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input_dir", required=True, help="path to folder containing images")
+parser.add_argument("--input_path", required=True, help="path to the list of sketch-colored image pairs")
 parser.add_argument("--output_dir", required=True, help="output path")
 parser.add_argument("--image_list_path", help="path to a file containing the path to images under `input-dir`."
                                               " If this is set, the list of images will be preprocessed instead of "
@@ -288,18 +292,27 @@ def find(d):
     # return result
     # This code search for all subdirectories and their subdirectories.
     result = []
-    if a.image_list_path is not None and os.path.isfile(a.image_list_path):
-        print("Using provided list of images.")
-        with open(a.image_list_path, 'r') as f:
-            for line in f.readlines():
-                result.append(os.path.join(d, line.rstrip("\n")))
-    else:
-        for path, subdirs, files in os.walk(d):
-            for name in files:
-                full_file_path = os.path.join(path, name)
-                _, ext = os.path.splitext(full_file_path.lower())
-                if ext == ".jpg" or ext == ".png":
-                    result.append(full_file_path)
+    # if a.image_list_path is not None and os.path.isfile(a.image_list_path):
+    #     print("Using provided list of images.")
+    #     with open(a.image_list_path, 'r') as f:
+    #         for line in f.readlines():
+    #             result.append(os.path.join(d, line.rstrip("\n")))
+    # else:
+    #     for path, subdirs, files in os.walk(d):
+    #         for name in files:
+    #             full_file_path = os.path.join(path, name)
+    #             _, ext = os.path.splitext(full_file_path.lower())
+    #             if ext == ".jpg" or ext == ".png":
+    #                 result.append(full_file_path)
+    num_illegal_lines = 0
+    with open(d, 'r') as f:
+        for line in f.readlines():
+            line_splitted = line.split("\t")
+            if len(line_splitted) == 4:
+                result.append((line_splitted[1], line_splitted[3].strip()))
+            else:
+                num_illegal_lines += 1
+    assert num_illegal_lines < len(result)
     result.sort()
     return result
 
@@ -355,7 +368,7 @@ def main():
         num_image = 0
         num_image_passing_bw = 0
         num_image_passing_face = 0
-        for num_image, src_path in enumerate(find(a.input_dir)):
+        for num_image, (src_path, sketch_path) in enumerate(find(a.input_path)):
             dst_path = png_path(os.path.join(color_dir, os.path.basename(src_path)))
             dst_sketch_path = png_path(os.path.join(sketch_dir, os.path.basename(src_path)))
             if not a.verbose:
@@ -365,11 +378,36 @@ def main():
                 print(src_path, "->", dst_path)
             try:
                 src = load(src_path)
+                sketch = load(sketch_path)
+
                 # First resize and crop the images to the correct shape.
                 height, width, num_channels = src.shape
                 if num_channels != 3 and num_channels != 4:
                     continue
+                sketch_height, sketch_width, sketch_num_channels = sketch.shape
+                if sketch_num_channels == 1:
+                    sketch = grayscale_to_rgb(images=sketch)
+                elif sketch_num_channels == 3:
+                    sketch = grayscale_to_rgb(images=rgb_to_grayscale(images=sketch))
+                elif sketch_num_channels == 4:
+                    sketch = grayscale_to_rgb(images=rgb_to_grayscale(images=sketch[...,:3]))
+                else:
+                    raise AssertionError("illegal sketch number of channels. Expecting 1, 3, or 4. Got %d"
+                                         %sketch_num_channels)
+                if sketch_height != height or sketch_width != width:
+                    if abs(float(sketch_height) / sketch_width - float(height) / width) < 0.05:
+                        if sketch_height > height:
+                            sketch = downscale(images=sketch, size=[height, width])
+                        else:
+                            sketch = upscale(images=sketch, size=[height, width])
+                    else:
+                        raise AssertionError("Sketch and colored image shape (h/w ratio) does not match. "
+                                             "Sketch has shape: %s and colored image has shape %s."
+                                             %(str(sketch.shape), str(src.shape))) # May change to print.
+
+
                 dst = src
+                dst_sketch = sketch
                 if height != width:
                     if a.pad:
                         size = max(height, width)
@@ -377,26 +415,29 @@ def main():
                         oh = (size - height) // 2
                         ow = (size - width) // 2
                         dst = pad(image=dst, offset_height=oh, offset_width=ow, target_height=size, target_width=size)
+                        dst_sketch = pad(image=dst_sketch, offset_height=oh, offset_width=ow, target_height=size, target_width=size)
                     else:
                         # crop to correct ratio
                         size = min(height, width)
                         oh = (height - size) // 2
                         ow = (width - size) // 2
                         dst = crop(image=dst, offset_height=oh, offset_width=ow, target_height=size, target_width=size)
+                        dst_sketch = crop(image=dst_sketch, offset_height=oh, offset_width=ow, target_height=size, target_width=size)
 
-                assert(dst.shape[0] == dst.shape[1])
+                assert(dst.shape[0] == dst.shape[1] and dst_sketch.shape[0] == dst_sketch.shape[1])
 
                 size, _, _ = dst.shape
                 if size > a.size:
                     dst = downscale(images=dst, size=[a.size, a.size])
+                    dst_sketch = downscale(images=dst_sketch, size=[a.size, a.size])
                 elif size < a.size:
                     dst = upscale(images=dst, size=[a.size, a.size])
+                    dst_sketch = upscale(images=dst_sketch, size=[a.size, a.size])
 
                 if a.allow_bw or not detect_bw_tf(dst,detect_bw_img_ph,detect_bw_op):
                     num_image_passing_bw += 1
                     if a.no_face_detection or detect_face(dst, cascade_classifier, face_min_size=min(a.size / 8, 48)):
                         num_image_passing_face += 1
-                        dst_sketch = to_sketch_op(images=dst,max_val=1.0, min_val=0.0)
                         save(dst, dst_path)
                         save(dst_sketch, dst_sketch_path)
                         src_txt_path = src_path+"txt"

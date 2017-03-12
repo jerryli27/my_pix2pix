@@ -961,10 +961,14 @@ def main():
         tf.summary.image("outputs", deprocessed_outputs)
 
     with tf.name_scope("predict_real_summary"):
-        tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
+        # Changed this because I no longer have tanh in the discriminator. In order for the image to be within range,
+        # I need to apply tanh here.
+        # tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
+        tf.summary.image("predict_real", tf.image.convert_image_dtype((tf.nn.tanh(model.predict_real) + 1) / 2, dtype=tf.uint8))
 
     with tf.name_scope("predict_fake_summary"):
-        tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
+        # tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
+        tf.summary.image("predict_fake", tf.image.convert_image_dtype((tf.nn.tanh(model.predict_fake)) + 1 / 2, dtype=tf.uint8))
 
     tf.summary.scalar("discriminator_loss", model.discrim_loss)
     tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
