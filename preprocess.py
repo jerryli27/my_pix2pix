@@ -6,6 +6,7 @@ import argparse
 import cv2
 import os
 import random
+import time
 import tensorflow as tf
 import numpy as np
 
@@ -352,15 +353,22 @@ def main():
     with tf.Session(config=config) as sess:
         detect_bw_img_ph = tf.placeholder(tf.float32, [a.size,a.size,3], name="detect_bw_img_ph")
         detect_bw_op = detect_bw_tf_op(detect_bw_img_ph)
-        num_image = 0
+        image_i = 0
         num_image_passing_bw = 0
         num_image_passing_face = 0
-        for num_image, src_path in enumerate(find(a.input_dir)):
+
+        all_image_paths = find(a.input_path)
+        num_images = len(all_image_paths)
+        start_time = time.time()
+        for image_i, src_path in enumerate(all_image_paths):
             dst_path = png_path(os.path.join(color_dir, os.path.basename(src_path)))
             dst_sketch_path = png_path(os.path.join(sketch_dir, os.path.basename(src_path)))
             if not a.verbose:
-                if num_image % 100 == 0:
-                    print("Processed %d images." %num_image)
+                if image_i % 100 == 0:
+                    current_time = time.time()
+                    remaining_time = 0.0 if image_i == 0 else (num_images - image_i) * (float(current_time - start_time) / image_i)
+                    print('%.3f%% done. Remaining time: %.1fs' % (float(image_i) / num_images * 100, remaining_time))
+                    # print("Processed %d images." %image_i)
             else:
                 print(src_path, "->", dst_path)
             try:
@@ -404,7 +412,7 @@ def main():
                             copy(src_txt_path, dst_path+".txt")
             except Exception as exception:
                 print("exception ", exception, " happened when processing ", src_path, "->", dst_path, ". Skipping this one. ")
-        print("Number of images preprocessed in total: %d. In which %d passed black-and-white test and %d passed face test and was saved." %(num_image +1, num_image_passing_bw ,num_image_passing_face))
+        print("Number of images preprocessed in total: %d. In which %d passed black-and-white test and %d passed face test and was saved." %(image_i +1, num_image_passing_bw ,num_image_passing_face))
 
 main()
 
