@@ -414,6 +414,7 @@ def main():
                 print("exception ", exception, " happened when processing ", src_path, "->", dst_path, ". Skipping this one. ")
         print("Number of images preprocessed in total: %d. In which %d passed black-and-white test and %d passed face test and was saved." %(image_i +1, num_image_passing_bw ,num_image_passing_face))
 
-main()
+if __name__ == "__main__":
+    main()
 
 """python tools/process.py --input_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/line/ --output_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train/ --b_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --operation=combine --size=128 --image_list_path=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/images_containing_face.txt --silent --gpu_limit=0.05"""

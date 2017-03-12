@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
 This file is for preprocessing a list of sketch-colored image pairs.
 """
@@ -11,6 +13,8 @@ import cv2
 import os
 import random
 import time
+import sys
+import traceback
 import tensorflow as tf
 import numpy as np
 
@@ -18,8 +22,8 @@ from PIL import ImageStat, Image
 from shutil import copy
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input_path", required=True, help="path to the list of sketch-colored image pairs")
-parser.add_argument("--output_dir", required=True, help="output path")
+parser.add_argument("--input_path", required=False, help="path to the list of sketch-colored image pairs")
+parser.add_argument("--output_dir", required=False, help="output path")
 parser.add_argument("--image_list_path", help="path to a file containing the path to images under `input-dir`."
                                               " If this is set, the list of images will be preprocessed instead of "
                                               "all images under `input-dir`")
@@ -99,7 +103,10 @@ def detect_bw_tf(img, img_ph, detect_bw_op, MSE_cutoff=0.001, adjust_color_bias=
     height, width, num_channels = img_ph.get_shape().as_list()
     if num_channels != 3 and num_channels != 4:
         return True
-    mse = detect_bw_op.eval(feed_dict={img_ph:img})
+    if num_channels == 4:
+        mse = detect_bw_op.eval(feed_dict={img_ph: img[...,:3]}) # Placeholder can only take 3 channels.
+    else:
+        mse = detect_bw_op.eval(feed_dict={img_ph:img})
     if mse <= MSE_cutoff:
         return True
     else:
@@ -374,6 +381,11 @@ def main():
         for image_i, (src_path, sketch_path) in enumerate(all_image_paths):
             dst_path = png_path(os.path.join(color_dir, os.path.basename(src_path)))
             dst_sketch_path = png_path(os.path.join(sketch_dir, os.path.basename(src_path)))
+
+            if os.path.isfile(dst_path):
+                if a.verbose:
+                    print("File exists at %s. Skipping this one." %(dst_path))
+                continue
             if not a.verbose:
                 if image_i % 100 == 0:
                     current_time = time.time()
@@ -391,6 +403,18 @@ def main():
                 if num_channels != 3 and num_channels != 4:
                     continue
                 sketch_height, sketch_width, sketch_num_channels = sketch.shape
+                if sketch_height != height or sketch_width != width:
+                    if abs(float(sketch_height) / sketch_width - float(height) / width) < 0.05:
+                        if sketch_height > height:
+                            sketch = downscale(images=sketch, size=[height, width])
+                        else:
+                            sketch = upscale(images=sketch, size=[height, width])
+                    else:
+                        if a.verbose:
+                            print("Sketch and colored image shape (h/w ratio) does not match. "
+                                  "Sketch has shape: %s and colored image has shape %s."
+                                  %(str(sketch.shape), str(src.shape))) # May change to print.
+                        continue
                 if sketch_num_channels == 1:
                     sketch = grayscale_to_rgb(images=sketch)
                 elif sketch_num_channels == 3:
@@ -400,16 +424,6 @@ def main():
                 else:
                     raise AssertionError("illegal sketch number of channels. Expecting 1, 3, or 4. Got %d"
                                          %sketch_num_channels)
-                if sketch_height != height or sketch_width != width:
-                    if abs(float(sketch_height) / sketch_width - float(height) / width) < 0.05:
-                        if sketch_height > height:
-                            sketch = downscale(images=sketch, size=[height, width])
-                        else:
-                            sketch = upscale(images=sketch, size=[height, width])
-                    else:
-                        raise AssertionError("Sketch and colored image shape (h/w ratio) does not match. "
-                                             "Sketch has shape: %s and colored image has shape %s."
-                                             %(str(sketch.shape), str(src.shape))) # May change to print.
 
 
                 dst = src
@@ -450,10 +464,23 @@ def main():
                         if os.path.isfile(src_txt_path):
                             copy(src_txt_path, dst_path+".txt")
             except Exception as exception:
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                traceback.print_exception(exc_type, exc_value, exc_traceback)
                 print("exception ", exception, " happened when processing ", src_path, "->", dst_path, ". Skipping this one. ")
         print("Number of images preprocessed in total: %d. In which %d passed black-and-white test and %d passed face test and was saved." %(image_i +1, num_image_passing_bw ,num_image_passing_face))
 
-main()
+if __name__ == "__main__":
+    main()
+
+    # The following is for testing whether a sketch where it has transparent pixels everywhere except the sketch part
+    # can be interpreted normally. Turns out it can.
+    # with tf.Session() as sess:
+    #     sketch_path = u'/home/xor/PycharmProjects/PixivUtil2/pixiv_downloaded/瑠璃クション (19020854)/61401930_p0 - 落書き線画.png'
+    #     sketch = load(sketch_path)
+    #     sketch = grayscale_to_rgb(images=rgb_to_grayscale(images=sketch[..., :3]))
+    #     cv2.imshow('Input', cv2.cvtColor(sketch * 255, cv2.COLOR_RGB2BGR).astype(np.uint8))
+    #     # cv2.imshow('Sketch', sketch.astype(np.uint8))
+    #     cv2.waitKey(0)
 
 """
 python preprocess_sketch_color.py --input_path=/mnt/pixiv_drive/home/ubuntu/PycharmProjects/PixivUtil2SketchAndColored/sketch_colored_list.txt --output_dir="/mnt/data_drive/home/ubuntu/sketch_colored_pair_128/" --no_face_detection --size=128 --gpu_limit=0.25
