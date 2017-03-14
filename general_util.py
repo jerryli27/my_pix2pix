@@ -142,7 +142,8 @@ def get_all_image_paths_in_dir(directory):
     """
     _allowed_extensions = ['.jpg', '.png', '.JPG', '.PNG']
     if not directory.endswith('/'):
-        raise AssertionError('The directory must end with a /')
+        directory = directory + "/"
+        # raise AssertionError('The directory must end with a /')
     content_dirs = []
     for path, subdirs, files in os.walk(directory):
         for name in files:

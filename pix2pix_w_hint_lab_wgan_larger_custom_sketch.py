@@ -20,8 +20,7 @@ import math
 import time
 import urllib
 
-from general_util import imread, get_all_image_paths_in_dir
-from neural_util import decode_image
+from general_util import imread
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
@@ -30,10 +29,6 @@ parser.add_argument("--output_dir", required=True, help="where to put output fil
 parser.add_argument("--seed", type=int)
 parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 parser.add_argument("--user_hint_path", default=None, help="path to a hint image.")
-parser.add_argument("--pretrained_sketch_net_path", default=None, help="path to the pretrained sketch network checkpoint")
-parser.add_argument("--single_input", dest="single_input", action="store_true",
-                    help="Input image is a single image instead of a combination of the source and target.")
-parser.set_defaults(single_input=False)
 
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
@@ -78,12 +73,8 @@ parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on 
 
 a = parser.parse_args()
 
-if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
-    parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
 if a.sketch_weight != 10.0:
     raw_input("Are you sure you don't want sketch_weight to be 10.0?")
-if a.mode != "test" and a.single_input:
-    raise AssertionError("single input mode is intended for test mode where only output is needed.")
 
 EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
@@ -252,13 +243,11 @@ def load_examples(user_hint = None):
     if not os.path.exists(a.input_dir):
         raise Exception("input_dir does not exist")
 
-    # input_paths = glob.glob(os.path.join(a.input_dir, "*.jpg"))
-    # decode = tf.image.decode_jpeg
-    # if len(input_paths) == 0:
-    #     input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
-    #     decode = tf.image.decode_png
-    input_paths = get_all_image_paths_in_dir(a.input_dir)
-    decode = decode_image
+    input_paths = glob.glob(os.path.join(a.input_dir, "*.jpg"))
+    decode = tf.image.decode_jpeg
+    if len(input_paths) == 0:
+        input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
+        decode = tf.image.decode_png
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -294,42 +283,29 @@ def load_examples(user_hint = None):
         # b_images = raw_input[:,width//2:,:] * 2 - 1
 
         # Modified code: change a_images and b_images to 0~1 before turning into grayscale and rescaling.
-        if a.single_input:
-            a_images = raw_input
-            b_images = raw_input
-        else:
-            a_images = raw_input[:, :width // 2, :]
-            b_images = raw_input[:, width // 2:, :]
+        a_images = raw_input[:, :width // 2, :]
+        b_images = raw_input[:, width // 2:, :]
         if a.gray_input_a:
             a_images = tf.image.rgb_to_grayscale(a_images)
         if a.gray_input_b:
             b_images = tf.image.rgb_to_grayscale(b_images)
 
         if a.lab_colorization:
-            # if a.which_direction=="AtoB":
-            #     lab = rgb_to_lab(b_images)
-            # else:
-            #     lab = rgb_to_lab(a_images)
-
-            # This doesn't work when I'm trying to train sketch gen...
-            # if a.which_direction=="AtoB":
-            #     lab = rgb_to_lab(b_images)
-            # else:
-            #     lab = rgb_to_lab(a_images)
-            lab = rgb_to_lab(b_images)
+            if a.which_direction=="AtoB":
+                lab = rgb_to_lab(b_images)
+            else:
+                lab = rgb_to_lab(a_images)
             L_chan, a_chan, b_chan = tf.unstack(lab, axis=2)
 
             L_chan = tf.expand_dims(L_chan, axis=2) / 50 - 1 # black and white with input range [0, 100]
             ab_chan = tf.stack([a_chan, b_chan], axis=2) / 110 # color channels with input range ~[-110, 110], not exact
 
-            # if a.which_direction=="AtoB":
-            #     b_images = tf.concat(2,[L_chan, ab_chan])
-            #     a_images =  a_images * 2 - 1
-            # else:
-            #     a_images = tf.concat(2,[L_chan, ab_chan])
-            #     b_images = b_images * 2 - 1
-            b_images = tf.concat(2,[L_chan, ab_chan])
-            a_images =  a_images * 2 - 1
+            if a.which_direction=="AtoB":
+                b_images = tf.concat(2,[L_chan, ab_chan])
+                a_images =  a_images * 2 - 1
+            else:
+                a_images = tf.concat(2,[L_chan, ab_chan])
+                b_images = b_images * 2 - 1
         else:
             a_images =  a_images * 2 - 1
             b_images = b_images * 2 - 1
@@ -536,6 +512,48 @@ def create_model(inputs, targets):
 
         return layers[-1]
 
+    def sketch_extractor(images, max_val=1.0, min_val=-1.0, color_space = "lab"):
+        images = (images - min_val) / (max_val - min_val) * 255.0
+        image_shape = images.get_shape().as_list()
+        is_single_image = False
+        if len(image_shape) == 3:
+            images = tf.expand_dims(images, axis=0)
+            image_shape = images.get_shape().as_list()
+            is_single_image = True
+        if len(image_shape) != 4:
+            raise AssertionError("Input image must have shape [batch_size, height, width, 1 or 3]")
+        if image_shape[3] == 3:
+            if color_space == "rgb":
+                # gray_images = tf.image.rgb_to_grayscale(images)
+                rgb_weights = [0.2989, 0.5870, 0.1140]
+                gray_images = tf.reduce_sum(images * rgb_weights, axis=3, keep_dims=True)
+            elif color_space == "lab":
+                gray_images = images[...,:1]
+            else:
+                raise AttributeError("Color space must be either lab or rgb.")
+
+        elif image_shape[3] == 1:
+            gray_images = images
+        else:
+            raise AssertionError("Input image must have shape [batch_size, height, width, 1 or 3]")
+        filt = np.expand_dims(np.array([[1, 1, 1],
+                                        [1, 1, 1],
+                                        [1, 1, 1]],
+                                       np.uint8), axis=2)
+        stride = 1
+        rate = 1
+        padding = 'SAME'
+        dil = tf.nn.dilation2d(gray_images, filt, (1, stride, stride, 1), (1, rate, rate, 1), padding,
+                               name='image_dilated')
+        sketch = 255 - tf.abs(gray_images - dil)
+        # Did NOT apply a threshold here to clear out the low values because i think it may not be necessary.
+        # sketch = tf.clip_by_value(sketch, 32, 255)
+        sketch = sketch / 255.0 * (max_val - min_val) + min_val
+        assert sketch.get_shape().as_list() == gray_images.get_shape().as_list()
+        if is_single_image:
+            sketch = sketch[0]
+        return sketch
+
 
     def create_sketch_generator(generator_inputs, generator_outputs_channels, trainable = True):
         layers = []
@@ -690,9 +708,11 @@ def create_model(inputs, targets):
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
+            # fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
+            fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            real_sketches = create_sketch_generator(targets, 1, trainable=False)
+            # real_sketches = create_sketch_generator(targets, 1, trainable=False)
+            real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -792,15 +812,11 @@ def save_images(fetches, image_dir, step=None):
     for i, in_path in enumerate(fetches["paths"]):
         name, _ = os.path.splitext(os.path.basename(in_path))
         fileset = {"name": name, "step": step}
-        kinds = ["outputs",] if a.single_input else (["inputs", "hints", "outputs", "targets"] if a.use_hint else ["inputs", "outputs", "targets"])
+        kinds = ["inputs", "hints", "outputs", "targets"] if a.use_hint else ["inputs", "outputs", "targets"]
         for kind in kinds:
-            if a.single_input:
-                # Do not modify file name when single input.
-                filename = name + ".png"
-            else:
-                filename = name + "-" + kind + ".png"
-                if step is not None:
-                    filename = "%08d-%s" % (step, filename)
+            filename = name + "-" + kind + ".png"
+            if step is not None:
+                filename = "%08d-%s" % (step, filename)
             fileset[kind] = filename
             out_path = os.path.join(image_dir, filename)
             contents = fetches[kind][i]
@@ -1030,25 +1046,26 @@ def main():
             saver.save(sess,checkpoint)
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        if a.use_sketch_loss: # and a.checkpoint is None:
-            sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-            # This is a sanity check to make sure sketch variables are not trainable.
-            assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-                                           scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
-            other_var = [var for var in tf.global_variables() if
-                         (var not in sketch_var)]
-            print("number of sketch var = %d, number of other var = %d"
-                  % (len(sketch_var), len(other_var)))
-            assert len(sketch_var) != 0
-            saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
-            with tf.Session(config=config) as sess:
-                print("loading sketch generator model from checkpoint")
-                pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
-                saver.restore(sess, pretrained_sketch_checkpoint)
-                sess.run(tf.initialize_variables(other_var))
-                saver = tf.train.Saver(max_to_keep=1)
-        else:
-            saver = tf.train.Saver(max_to_keep=1)
+        # if a.use_sketch_loss: # and a.checkpoint is None:
+        #     sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+        #     # This is a sanity check to make sure sketch variables are not trainable.
+        #     assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+        #                                    scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
+        #     other_var = [var for var in tf.global_variables() if
+        #                  (var not in sketch_var)]
+        #     print("number of sketch var = %d, number of other var = %d"
+        #           % (len(sketch_var), len(other_var)))
+        #     assert len(sketch_var) != 0
+        #     saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
+        #     with tf.Session(config=config) as sess:
+        #         print("loading sketch generator model from checkpoint")
+        #         pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
+        #         saver.restore(sess, pretrained_sketch_checkpoint)
+        #         sess.run(tf.initialize_variables(other_var))
+        #         saver = tf.train.Saver(max_to_keep=1)
+        # else:
+        #     saver = tf.train.Saver(max_to_keep=1)
+        saver = tf.train.Saver(max_to_keep=1)
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
@@ -1069,8 +1086,7 @@ def main():
                 filesets = save_images(results, image_dir)
                 for i, path in enumerate(results["paths"]):
                     print(step * a.batch_size + i + 1, "evaluated image", os.path.basename(path))
-                if not a.single_input:
-                    index_path = append_index(filesets)
+                index_path = append_index(filesets)
 
             print("wrote index at", index_path)
         else:
@@ -1175,20 +1191,19 @@ main()
 """
 """
 # Sanity check
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_custom_sketch.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_custom_sketch_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --use_hint --lab_colorization
 # Train
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_custom_sketch.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --use_hint --lab_colorization --gpu_percentage 0.45
 # Train 512
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger --from_128
+python pix2pix_w_hint_lab_wgan_larger_custom_sketch.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger_custom_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger_custom_sketch --from_128
 # TO train a network that turns colored images into sketches:
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
 
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/test/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch
+python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --train_sketch
 # Test
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger_custom_sketch.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch
+python pix2pix_w_hint_lab_wgan_larger_custom_sketch.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger_custom_sketch.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_custom_sketch --user_hint_path=BLANK
 
 """
 

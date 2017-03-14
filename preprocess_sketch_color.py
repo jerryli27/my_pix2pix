@@ -103,7 +103,7 @@ def detect_bw_tf(img, img_ph, detect_bw_op, MSE_cutoff=0.001, adjust_color_bias=
     height, width, num_channels = img_ph.get_shape().as_list()
     if num_channels != 3 and num_channels != 4:
         return True
-    if num_channels == 4:
+    if img.shape[-1] == 4:
         mse = detect_bw_op.eval(feed_dict={img_ph: img[...,:3]}) # Placeholder can only take 3 channels.
     else:
         mse = detect_bw_op.eval(feed_dict={img_ph:img})
@@ -284,7 +284,7 @@ def load(path):
     elif ext == ".png":
         image = decode_png(contents=contents)
     else:
-        raise Exception("invalid image suffix")
+        raise Exception("invalid image suffix %s for path %s" %(ext, path))
 
     return to_float32(image=image)
 

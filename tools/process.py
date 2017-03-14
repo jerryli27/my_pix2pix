@@ -205,6 +205,8 @@ def main():
     with tf.Session(config=config) as sess:
         for num_image, src_path in enumerate(find(a.input_dir)):
             dst_path = png_path(os.path.join(a.output_dir, os.path.basename(src_path)))
+            if os.path.isfile(dst_path):
+                continue
             if a.silent:
                 if num_image % 100 == 0:
                     print("Processed %d images." %num_image)
@@ -297,4 +299,6 @@ def main():
 
 main()
 
-"""python tools/process.py --input_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/line/ --output_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train/ --b_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --operation=combine --size=128 --image_list_path=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/images_containing_face.txt --silent --gpu_limit=0.05"""
+"""
+python tools/process.py --input_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/line/ --output_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train/ --b_dir=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --operation=combine --size=128 --image_list_path=/mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/images_containing_face.txt --silent --gpu_limit=0.05
+"""
