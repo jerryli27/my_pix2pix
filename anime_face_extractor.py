@@ -10,12 +10,12 @@ import time
 import os.path
 from argparse import ArgumentParser
 
-from general_util import get_all_image_paths_in_dir, get_file_name
+from general_util import get_all_image_paths, get_file_name
 
 def detect(colored_save_dir, save_path="images_containing_face.txt", face_min_size=32, cascade_file="./lbpcascade_animeface.xml"):
 
     colored_image_dir_len = len(colored_save_dir)
-    all_img_dirs = get_all_image_paths_in_dir(colored_save_dir)
+    all_img_dirs = get_all_image_paths(colored_save_dir)
     num_images = len(all_img_dirs)
     num_images_with_face = 0
 

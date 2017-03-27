@@ -133,27 +133,40 @@ def read_and_resize_bw_mask_images(dirs, height, width, batch_size, semantic_mas
     return np_images
 
 
-def get_all_image_paths_in_dir(directory):
+def get_all_image_paths(directory, do_sort=True):
     # type: (str) -> List[str]
     """
 
-    :param directory: The parent directory of the images.
+    :param directory: The parent directory of the images, or a file containing paths to images.
     :return: A sorted list of paths to images in the directory as well as all of its subdirectories.
     """
-    _allowed_extensions = ['.jpg', '.png', '.JPG', '.PNG']
-    if not directory.endswith('/'):
-        directory = directory + "/"
-        # raise AssertionError('The directory must end with a /')
-    content_dirs = []
-    for path, subdirs, files in os.walk(directory):
-        for name in files:
-            full_file_path = os.path.join(path, name)
-            base, ext = os.path.splitext(full_file_path)
-            if ext in _allowed_extensions:
-                content_dirs.append(full_file_path)
-    if len(content_dirs) == 0:
-        raise AssertionError('There is no image in directory %s' % directory)
-    content_dirs = sorted(content_dirs)
+    if os.path.isdir(directory):
+        _allowed_extensions = {'.jpg', '.png',}
+        if not directory.endswith('/'):
+            directory = directory + "/"
+        content_dirs = []
+        for path, subdirs, files in os.walk(directory):
+            for name in files:
+                full_file_path = os.path.join(path, name)
+                _, ext = os.path.splitext(full_file_path)
+                ext = ext.lower()
+                if ext in _allowed_extensions:
+                    content_dirs.append(full_file_path)
+        if len(content_dirs) == 0:
+            raise AssertionError('There is no image in directory %s.' % directory)
+    elif os.path.isfile(directory):
+        content_dirs = []
+        with open(directory, 'r') as f:
+            for line in f.readlines():
+                line = line.strip()
+                if len(line) > 0:
+                    content_dirs.append(line)
+        if len(content_dirs) == 0:
+            raise AssertionError('There is no image in file %s.' % directory)
+    else:
+        raise AssertionError('There is no file or directory named %s.' % directory)
+    if do_sort:
+        content_dirs.sort()
     return content_dirs
 
 
@@ -300,7 +313,7 @@ def read_resize_and_save_batch_images(dirs, height, width, save_path, bw=False, 
 def read_resize_and_save_all_imgs_in_dir(directory, height, width, save_dir, batch_size, bw=False,
                                          max_size_g=32):
     assert save_dir[-1] == '/'
-    all_img_dirs = get_all_image_paths_in_dir(directory)
+    all_img_dirs = get_all_image_paths(directory)
     num_images = len(all_img_dirs)
     image_per_file = max_size_g * (1024 ** 3) / (height * width * (1 if bw else 3) * 1)
     # Make sure that each file contains number of images that is divisible by batch size.

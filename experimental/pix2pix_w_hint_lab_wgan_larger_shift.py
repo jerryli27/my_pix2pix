@@ -21,7 +21,7 @@ import time
 import urllib
 
 from general_util import imread, get_all_image_paths
-from neural_util import decode_image, decode_image_with_file_name
+from neural_util import decode_image
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
@@ -78,6 +78,8 @@ parser.add_argument("--use_sketch_loss", dest="use_sketch_loss", action="store_t
                          "versus that of the original image.")
 parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
 parser.add_argument("--hint_prob", type=float, default=0.5, help="The probability of having hint as extra input channels.")
+parser.add_argument("--random_shift_stddev", type=float, default=0.2, help="The standard deviation to the random shifting of the input sketch")
+parser.add_argument("--random_shift_min", type=float, default=0.95, help="The minimum coefficient to the random shifting of the input sketch")
 
 
 
@@ -265,7 +267,7 @@ def load_examples(user_hint = None):
     #     input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
     #     decode = tf.image.decode_png
     input_paths = get_all_image_paths(a.input_dir)
-    decode = decode_image_with_file_name
+    decode = decode_image
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -281,11 +283,23 @@ def load_examples(user_hint = None):
     else:
         input_paths = sorted(input_paths)
 
+    # synchronize seed for image operations so that we do the same operations to both
+    # input and output images
+    seed = random.randint(0, 2**31 - 1)
+
+    def shift(image):
+        # This assumes the image is in the range 0 to 1.
+        r_negated = 1 - image
+        r_shifted = r_negated * tf.maximum(tf.random_normal([], mean=1.0, stddev= a.random_shift_stddev, seed=seed, name="random_shift_coefficient"), a.random_shift_min)
+        r_capped = tf.maximum(tf.minimum(r_shifted, 1.0), 0.0)
+        r = 1 - r_capped
+        return r
+
     with tf.name_scope("load_images"):
         path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
-        raw_input = decode(contents, paths, channels=3)
+        raw_input = decode(contents)
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -335,10 +349,11 @@ def load_examples(user_hint = None):
             # else:
             #     a_images = tf.concat(2,[L_chan, ab_chan])
             #     b_images = b_images * 2 - 1
+
             b_images = tf.concat(2,[L_chan, ab_chan])
-            a_images =  a_images * 2 - 1
+            a_images = shift(a_images) * 2 - 1
         else:
-            a_images =  a_images * 2 - 1
+            a_images = shift(a_images) * 2 - 1
             b_images = b_images * 2 - 1
 
 
@@ -349,9 +364,6 @@ def load_examples(user_hint = None):
     else:
         raise Exception("invalid direction")
 
-    # synchronize seed for image operations so that we do the same operations to both
-    # input and output images
-    seed = random.randint(0, 2**31 - 1)
     def transform(image):
         r = image
         if a.flip:

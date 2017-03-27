@@ -484,4 +484,8 @@ if __name__ == "__main__":
 
 """
 python preprocess_sketch_color.py --input_path=/mnt/pixiv_drive/home/ubuntu/PycharmProjects/PixivUtil2SketchAndColored/sketch_colored_list.txt --output_dir="/mnt/data_drive/home/ubuntu/sketch_colored_pair_128/" --no_face_detection --size=128 --gpu_limit=0.25
+
+python preprocess_sketch_color.py --input_path=/mnt/pixiv_drive/home/ubuntu/PycharmProjects/PixivUtil2SketchAndColored/sketch_colored_cleaned_list.txt --output_dir="/mnt/data_drive/home/ubuntu/sketch_colored_pair_cleaned_512/" --no_face_detection --size=512 --gpu_limit=0.25
+
+
 """

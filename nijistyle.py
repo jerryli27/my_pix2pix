@@ -141,13 +141,13 @@ def main():
     if options.use_semantic_masks:
         assert options.output_semantic_mask is not None and options.output_semantic_mask != ''
         assert (len(options.style_semantic_masks) == len(options.styles))
-        output_semantic_mask_paths = get_all_image_paths_in_dir(options.output_semantic_mask)
+        output_semantic_mask_paths = get_all_image_paths(options.output_semantic_mask)
         output_semantic_mask = read_and_resize_bw_mask_images(output_semantic_mask_paths, options.height, options.width,
                                                               1,
                                                               options.semantic_masks_num_layers)
         style_semantic_masks = []
         for style_i, style_semantic_mask_dir in enumerate(options.style_semantic_masks):
-            style_semantic_mask_paths = get_all_image_paths_in_dir(style_semantic_mask_dir)
+            style_semantic_mask_paths = get_all_image_paths(style_semantic_mask_dir)
             style_semantic_masks.append(
                 read_and_resize_bw_mask_images(style_semantic_mask_paths, style_images[style_i].shape[0],
                                                style_images[style_i].shape[1], 1,

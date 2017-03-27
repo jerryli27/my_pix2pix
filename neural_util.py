@@ -220,3 +220,36 @@ def decode_image(contents, channels=None, name=None):
 
         is_jpeg = math_ops.equal(substr, b'\xff\xd8\xff\xe0', name='is_jpeg')
         return control_flow_ops.cond(is_jpeg, _jpeg, check_png, name='cond_jpeg')
+
+def decode_image_with_file_name(contents, file_name, channels=None, name=None):
+    # Cannot use the tensorflow decode_image function because sometimes the image file does not contain the proper
+    # prefix for some reason, but as long as the extension is correct, my function will work.
+    assert len(contents.get_shape().as_list()) == 0 and len(file_name.get_shape().as_list()) == 0
+    ext = get_tf_string_extension(file_name)
+
+    def _png():
+        return gen_image_ops.decode_png(contents, channels)
+
+    def _jpeg():
+        is_jpeg = tf.logical_or(math_ops.equal(ext, 'jpg', name='is_jpg'),
+                                math_ops.equal(ext, 'JPG', name='is_jpg_cap'))
+        decode_msg = 'Unable to decode bytes as JPEG or PNG.'
+        assert_decode = control_flow_ops.Assert(is_jpeg, [decode_msg])
+        with ops.control_dependencies([assert_decode, ]):
+            return gen_image_ops.decode_jpeg(contents, channels)
+
+    is_png = math_ops.logical_or(math_ops.equal(ext, 'png', name='is_png'), math_ops.equal(ext, 'PNG', name='is_png_cap'))
+    return control_flow_ops.cond(is_png, _png, _jpeg, name='cond_png')
+
+def get_tf_string_extension(file_name):
+    file_name = tf.identity(file_name)
+    if len(file_name.get_shape().as_list()) == 0:
+        split_result = tf.string_split([file_name], '.')
+        return tf.sparse_tensor_to_dense(split_result, default_value="")[0, -1]
+    elif len(file_name.get_shape().as_list()) == 1:
+        split_result = tf.string_split(file_name, '.')
+        return tf.sparse_tensor_to_dense(split_result, default_value="")[:, -1]
+    else:
+        raise AttributeError("Incorrect input dimension to get_tf_string_extension. "
+                             "The input should be either a 0d or 1d string. The current input shape is %s."
+                             %(str(file_name.get_shape().as_list())))

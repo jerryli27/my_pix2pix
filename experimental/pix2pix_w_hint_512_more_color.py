@@ -1311,6 +1311,9 @@ def main():
 main()
 
 """
+python pix2pix_w_hint_512_more_color.py --mode train --output_dir sanity_check_train_more_color --input_dir multi_possiblity_sanity_check_combined/ --which_direction AtoB --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.25 --display_freq=500 --max_epochs=5000 --scale_size=143 --crop_size=128 --use_bin
+
+
 
 python pix2pix_w_hint_512_more_color.py --mode train --output_dir sanity_check_train_more_color --max_epochs 500 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 1 --lr 0.008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --use_bin
 --mode train --output_dir sanity_check_train --max_epochs 200 --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --display_freq=5 --use_hint

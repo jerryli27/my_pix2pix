@@ -21,7 +21,7 @@ import time
 import urllib
 
 from general_util import imread, get_all_image_paths
-from neural_util import decode_image, decode_image_with_file_name
+from neural_util import decode_image
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
@@ -41,6 +41,7 @@ parser.set_defaults(output_ab=False)
 
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
+parser.add_argument("--discrim_freq", type=int, default=1000, help="Train the discriminator 100 times every discrim_freq steps")
 parser.add_argument("--summary_freq", type=int, default=10, help="update summaries every summary_freq steps")
 parser.add_argument("--progress_freq", type=int, default=50, help="display progress every progress_freq steps")
 # to get tracing working on GPU, LD_LIBRARY_PATH may need to be modified:
@@ -77,7 +78,6 @@ parser.add_argument("--use_sketch_loss", dest="use_sketch_loss", action="store_t
                     help="Use the pretrained sketch generator network to compare the sketches of the generated image "
                          "versus that of the original image.")
 parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
-parser.add_argument("--hint_prob", type=float, default=0.5, help="The probability of having hint as extra input channels.")
 
 
 
@@ -100,7 +100,7 @@ APPROXIMATE_NUMBER_OF_TOTAL_PARAMETERS = 98218176
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train, discrim_train")
 
 
 def conv(batch_input, out_channels, stride, shift=4, pad = 1, trainable=True):
@@ -265,7 +265,7 @@ def load_examples(user_hint = None):
     #     input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
     #     decode = tf.image.decode_png
     input_paths = get_all_image_paths(a.input_dir)
-    decode = decode_image_with_file_name
+    decode = decode_image
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -285,7 +285,7 @@ def load_examples(user_hint = None):
         path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
-        raw_input = decode(contents, paths, channels=3)
+        raw_input = decode(contents)
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -389,9 +389,9 @@ def load_examples(user_hint = None):
             with tf.control_dependencies([clear_hint_op,hints]):
                 # I cannot assign this to any other variable, otherwise it will cause the program to be confused on
                 # whether the clear hint op should be ran first or the scatter update first.
-                half_constant = tf.constant(a.hint_prob)
+                half_constant = tf.constant(0.50)
 
-                output = tf.cond(tf.greater_equal(random_condition, half_constant), lambda: output, lambda: tf.scatter_nd_update(output, rd_indices_2d, hints))
+                output = tf.cond(tf.less(random_condition, half_constant), lambda: output, lambda: tf.scatter_nd_update(output, rd_indices_2d, hints))
         else:
             output = tf.assign(output, user_hint)
 
@@ -433,7 +433,7 @@ def create_model(inputs, targets):
             # output = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
             # layers.append(output)
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            output = batchnorm(convolved, trainable=trainable)
+            output = batchnorm(convolved)
             # rectified = lrelu(output, 0.2)
             rectified = tf.nn.relu(output)
             layers.append(rectified)
@@ -466,7 +466,7 @@ def create_model(inputs, targets):
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
+                output = batchnorm(convolved)
                 rectified = tf.nn.relu(output)
                 layers.append(rectified)
         # for out_channels in layer_specs:
@@ -844,6 +844,7 @@ def create_model(inputs, targets):
         gen_loss_sketch=ema.average(gen_loss_sketch) if a.use_sketch_loss else None,
         outputs=outputs,
         train=tf.group(update_losses, incr_global_step, gen_train),
+        discrim_train=tf.group(discrim_train),
     )
 
 
@@ -1188,7 +1189,7 @@ def main():
                 if not a.single_input:
                     for i, path in enumerate(results["paths"]):
                         print(step * a.batch_size + i + 1, "evaluated image", os.path.basename(path))
-                    index_path = append_index(filesets)
+                        index_path = append_index(filesets)
                 else:
                     if step % 100 == 0:
                         print("Evaluated %d out of %d steps." %(step,examples.steps_per_epoch))
@@ -1224,6 +1225,10 @@ def main():
                 #
                 # print(np.sum(io_results["inputs"][...,1:]))
                 # print(np.sum(io_results["targets"]))
+
+                if should(a.discrim_freq):
+                    for _ in range(100):
+                        sess.run(model.discrim_train, options=options, run_metadata=run_metadata)
 
 
                 fetches = {

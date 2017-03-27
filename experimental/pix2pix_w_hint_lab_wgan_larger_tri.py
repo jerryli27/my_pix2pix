@@ -19,9 +19,10 @@ import collections
 import math
 import time
 import urllib
+from typing import Union, Callable
 
 from general_util import imread, get_all_image_paths
-from neural_util import decode_image, decode_image_with_file_name
+from neural_util import decode_image
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
@@ -77,7 +78,9 @@ parser.add_argument("--use_sketch_loss", dest="use_sketch_loss", action="store_t
                     help="Use the pretrained sketch generator network to compare the sketches of the generated image "
                          "versus that of the original image.")
 parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
+parser.add_argument("--choose_best_prob", type=float, default=0.9, help="The proabability to choose the best output over a random one.")
 parser.add_argument("--hint_prob", type=float, default=0.5, help="The probability of having hint as extra input channels.")
+parser.add_argument("--num_outputs", type=int, default=3, help="The number of possible outputs.")
 
 
 
@@ -96,11 +99,12 @@ EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
 CLIP_VALUE = 0.04  # 0.01
 APPROXIMATE_NUMBER_OF_TOTAL_PARAMETERS = 98218176
+a.num_outputs = 3
 
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
+Model = collections.namedtuple("Model", "outputs, possible_outputs, output_chosen_index, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
 
 
 def conv(batch_input, out_channels, stride, shift=4, pad = 1, trainable=True):
@@ -143,6 +147,50 @@ def batchnorm(input, trainable=True):
         normalized = tf.nn.batch_normalization(input, mean, variance, offset, scale, variance_epsilon=variance_epsilon)
         return normalized
 
+def instance_norm(input, one_hot_style_vector=None, trainable=True):
+    # type: (tf.Tensor, Union[None,tf.Tensor], bool) -> tf.Tensor
+    """
+    For the purpose of this function, please refer to the paper
+    "Instance Normalization - The Missing Ingredient for Fast Stylization"
+    TODO: maybe there's something wrong with the description. It might not be exactly instance norm.
+    :param input:
+    :param trainable:
+    :return:
+    """
+    with tf.variable_scope("instance_norm"):
+        # this block looks like it has 3 inputs on the graph unless we do this
+        input = tf.identity(input)
+
+        channels = input.get_shape()[3]
+
+        if one_hot_style_vector is None:
+            var_shape = [channels]
+        else:
+            one_hot_style_vector = tf.identity(one_hot_style_vector)
+            num_styles = one_hot_style_vector.get_shape().as_list()[1]
+            # num_styles = one_hot_style_vector.shape[1]
+            var_shape = [num_styles, channels]
+        offset = tf.get_variable("offset", var_shape, dtype=tf.float32, initializer=tf.zeros_initializer, trainable=trainable)
+        scale = tf.get_variable("scale", var_shape, dtype=tf.float32, initializer=tf.random_normal_initializer(1.0, 0.02), trainable=trainable)
+        if one_hot_style_vector is not None:
+            offset = tf.matmul(one_hot_style_vector, offset)
+            scale = tf.matmul(one_hot_style_vector, scale)
+            offset = offset[0]
+            scale = scale[0]
+        mu, sigma_sq = tf.nn.moments(input, [1, 2], keep_dims=True)
+        # Try applying an abs on the sigma_sq. in theory it should always be positive but in practice due to inaccuracy
+        # in float calculation, it may be negative when the actual sigma is very small, which causes the output to be
+        # NaN sometimes. It's probably a bug on tensorflow's side.
+        sigma_sq = tf.abs(sigma_sq)
+        epsilon = 1e-5
+        normalized = (input - mu) / (sigma_sq + epsilon) ** (.5)
+        return scale * normalized + offset
+
+def smart_norm(input, one_hot_style_vector=None, trainable=True):
+    if one_hot_style_vector is None:
+        return batchnorm(input, trainable)
+    else:
+        return instance_norm(input, one_hot_style_vector,trainable)
 
 def deconv(batch_input, out_channels, stride = 2, shift = 4, trainable=True):
     with tf.variable_scope("deconv"):
@@ -265,7 +313,7 @@ def load_examples(user_hint = None):
     #     input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
     #     decode = tf.image.decode_png
     input_paths = get_all_image_paths(a.input_dir)
-    decode = decode_image_with_file_name
+    decode = decode_image
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -285,7 +333,7 @@ def load_examples(user_hint = None):
         path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
-        raw_input = decode(contents, paths, channels=3)
+        raw_input = decode(contents)
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -424,7 +472,7 @@ def load_examples(user_hint = None):
 
 
 def create_model(inputs, targets):
-    def create_generator(generator_inputs, generator_outputs_channels, trainable = True):
+    def create_generator(generator_inputs, generator_outputs_channels, one_hot_vec=None, trainable = True):
         layers = []
 
         # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
@@ -433,7 +481,8 @@ def create_model(inputs, targets):
             # output = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
             # layers.append(output)
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            output = batchnorm(convolved, trainable=trainable)
+
+            output = smart_norm(convolved, one_hot_vec, trainable)
             # rectified = lrelu(output, 0.2)
             rectified = tf.nn.relu(output)
             layers.append(rectified)
@@ -466,7 +515,8 @@ def create_model(inputs, targets):
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
+                # output = batchnorm(convolved)
+                output = smart_norm(convolved, one_hot_vec, trainable)
                 rectified = tf.nn.relu(output)
                 layers.append(rectified)
         # for out_channels in layer_specs:
@@ -526,7 +576,8 @@ def create_model(inputs, targets):
                 # rectified = tf.nn.relu(input)
                 # # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
                 # output = deconv(rectified, out_channels, trainable=trainable)
-                output = batchnorm(output, trainable=trainable)
+                # output = batchnorm(output, trainable=trainable)
+                output = smart_norm(output, one_hot_vec, trainable)
                 #
                 # if dropout > 0.0:
                 #     output = tf.nn.dropout(output, keep_prob=1 - dropout)
@@ -537,6 +588,7 @@ def create_model(inputs, targets):
         with tf.variable_scope("decoder_1"):
             #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
             input = tf.concat(3,[layers[-1], layers[0]])
+            # output = deconv(input, generator_outputs_channels * a.num_outputs, 1, 3, trainable=trainable)
             output = deconv(input, generator_outputs_channels, 1, 3, trainable=trainable)
             # output = tf.tanh(output)
             layers.append(output)
@@ -735,6 +787,7 @@ def create_model(inputs, targets):
     with tf.variable_scope("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
         out_channels = int(targets.get_shape()[-1])
         if a.output_ab:
+            raise NotImplementedError
             assert out_channels == 3
             ab_outputs = create_generator(inputs, 2)
             # Concatenate the l layer in the input with the ab output by the generator.
@@ -742,7 +795,43 @@ def create_model(inputs, targets):
             print(outputs.get_shape().as_list())
             assert int(outputs.get_shape()[-1]) == out_channels
         else:
-            outputs = create_generator(inputs, out_channels) # if not a.train_sketch else create_sketch_generator(inputs, out_channels)
+            assert out_channels == 3
+            outputs_one_hot_vec = []
+            outputs_separated = []
+            outputs_separated_l1_losses = []
+            for output_i in range(a.num_outputs):
+                outputs_one_hot_vec.append(np.array([[0 if j!= output_i else 1 for j in range(a.num_outputs)]], dtype=np.float32))
+                print(outputs_one_hot_vec)
+                with tf.variable_scope("generator", reuse=False if output_i == 0 else True) as subscope:
+                    current_output_separated = create_generator(inputs, out_channels, one_hot_vec=outputs_one_hot_vec[-1])
+                outputs_separated.append(current_output_separated)
+                # Calculate the l1 loss for each output and for each instance in the batch.
+                outputs_separated_l1_losses.append(tf.reduce_mean(tf.abs(targets - outputs_separated[output_i]), axis=(1,2,3)))
+                print(outputs_separated_l1_losses[output_i].get_shape().as_list())
+                assert outputs_separated_l1_losses[output_i].get_shape().as_list() == [a.batch_size,]
+
+            outputs_separated_l1_losses = tf.stack(outputs_separated_l1_losses)
+            assert outputs_separated_l1_losses.get_shape().as_list() == [a.num_outputs, a.batch_size]
+            outputs_combined = tf.stack(outputs_separated)
+
+            # With a small probaility, instead of choosing the most fit output, choose a random one.
+            random_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32, name="random_possible_output_condition")
+            random_prob_constant = tf.constant(a.choose_best_prob)
+            random_index = tf.random_uniform(shape=[a.batch_size], minval=0, maxval=a.num_outputs, dtype=tf.int64, name="random_possible_output_index")
+            outputs_separated_l1_losses_argmin = tf.cond(tf.greater_equal(random_condition, random_prob_constant), lambda: random_index,
+                             lambda: tf.argmin(outputs_separated_l1_losses, axis=0))
+            # Now we have one index for each item in the batch.
+
+            assert outputs_separated_l1_losses_argmin.get_shape().as_list() == [a.batch_size,]
+            # In order to use gather properly, we must have the indices in the following format:
+            # a list with foramt (chosen_output_i, batch_i). So append (0,1,2,...batch_size-1) to the indices.
+            batch_indices = np.array([batch_i for batch_i in range(a.batch_size)], dtype=np.int32)
+            outputs_separated_l1_losses_argmin = tf.stack((outputs_separated_l1_losses_argmin,batch_indices),axis=1)
+            assert outputs_separated_l1_losses_argmin.get_shape().as_list() == [a.batch_size,2]
+            outputs_separated_l1_losses_argmin = tf.cast(outputs_separated_l1_losses_argmin, dtype=tf.int32)
+            outputs_chosen = tf.gather_nd(outputs_combined, outputs_separated_l1_losses_argmin)
+            outputs = outputs_chosen
+            assert outputs.get_shape().as_list() == targets.get_shape().as_list()
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
@@ -843,6 +932,8 @@ def create_model(inputs, targets):
         gen_loss_L1=ema.average(gen_loss_L1),
         gen_loss_sketch=ema.average(gen_loss_sketch) if a.use_sketch_loss else None,
         outputs=outputs,
+        possible_outputs=outputs_separated,
+        output_chosen_index=outputs_separated_l1_losses_argmin,
         train=tf.group(update_losses, incr_global_step, gen_train),
     )
 
@@ -852,7 +943,7 @@ def save_images(fetches, image_dir, step=None):
     for i, in_path in enumerate(fetches["paths"]):
         name, _ = os.path.splitext(os.path.basename(in_path))
         fileset = {"name": name, "step": step}
-        kinds = ["outputs", ]
+        kinds = ["outputs", "possible_outputs"]
         if not a.single_input:
             kinds = kinds + ["inputs", "targets"]
             if a.use_hint:
@@ -861,18 +952,35 @@ def save_images(fetches, image_dir, step=None):
                 kinds = kinds + ["real_sketches", "fake_sketches"]
         # kinds = ["outputs",] if a.single_input else (["inputs", "hints", "outputs", "targets"] if a.use_hint else ["inputs", "outputs", "targets"])
         for kind in kinds:
-            if a.single_input:
-                # Do not modify file name when single input.
-                filename = name + ".png"
+            if kind == "possible_outputs":
+                filenames = []
+                for output_i in range(a.num_outputs):
+                    if a.single_input:
+                        # Do not modify file name when single input.
+                        continue
+                    else:
+                        filename = name + "-" + kind + "-" + str(output_i) +  ".png"
+                        if step is not None:
+                            filename = "%08d-%s" % (step, filename)
+                    out_path = os.path.join(image_dir, filename)
+                    contents = fetches[kind][output_i][i]
+                    with open(out_path, "w") as f:
+                        f.write(contents)
+                    filenames.append(filename)
+                fileset[kind] = filenames
             else:
-                filename = name + "-" + kind + ".png"
-                if step is not None:
-                    filename = "%08d-%s" % (step, filename)
-            fileset[kind] = filename
-            out_path = os.path.join(image_dir, filename)
-            contents = fetches[kind][i]
-            with open(out_path, "w") as f:
-                f.write(contents)
+                if a.single_input:
+                    # Do not modify file name when single input.
+                    filename = name + ".png"
+                else:
+                    filename = name + "-" + kind + ".png"
+                    if step is not None:
+                        filename = "%08d-%s" % (step, filename)
+                fileset[kind] = filename
+                out_path = os.path.join(image_dir, filename)
+                contents = fetches[kind][i]
+                with open(out_path, "w") as f:
+                    f.write(contents)
         filesets.append(fileset)
     return filesets
 
@@ -886,16 +994,18 @@ def append_index(filesets, step=False):
         index.write("<html><meta content=\"text/html;charset=utf-8\" http-equiv=\"Content-Type\"><meta content=\"utf-8\" http-equiv=\"encoding\"><body><table><tr>")
         if step:
             index.write("<th>step</th>")
+
+        possible_outputs_header = "".join(["<th>possible_output_%d</th>" %(output_i) for output_i in range(a.num_outputs)])
         if a.use_hint:
             if a.use_sketch_loss:
-                index.write("<th>name</th><th>input</th><th>hint</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th></tr>")
+                index.write("<th>name</th><th>input</th><th>hint</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th>"+possible_outputs_header+"</tr>")
             else:
-                index.write("<th>name</th><th>input</th><th>hint</th><th>output</th><th>target</th></tr>")
+                index.write("<th>name</th><th>input</th><th>hint</th><th>output</th><th>target</th>"+possible_outputs_header+"</tr>")
         else:
             if a.use_sketch_loss:
-                index.write("<th>name</th><th>input</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th></tr>")
+                index.write("<th>name</th><th>input</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th>"+possible_outputs_header+"</tr>")
             else:
-                index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>")
+                index.write("<th>name</th><th>input</th><th>output</th><th>target</th>"+possible_outputs_header+"</tr>")
 
     for fileset in filesets:
         index.write("<tr>")
@@ -908,6 +1018,9 @@ def append_index(filesets, step=False):
             kinds = kinds + ["real_sketches", "fake_sketches"]
         for kind in kinds:
             index.write("<td><img src=\"images/%s\"></td>" % urllib.quote(fileset[kind]))
+
+        for output_i in range(a.num_outputs):
+            index.write("<td><img src=\"images/%s\"></td>" % urllib.quote(fileset["possible_outputs"][output_i]))
 
         index.write("</tr>")
     return index_path
@@ -1034,6 +1147,7 @@ def main():
 
     with tf.name_scope("deprocess_outputs"):
         deprocessed_outputs = deprocess(model.outputs)
+        deprocessed_possible_outputs = [deprocess(possible_output) for possible_output in model.possible_outputs]
 
     if a.use_sketch_loss:
         with tf.name_scope("deprocess_real_sketches"):
@@ -1050,6 +1164,7 @@ def main():
                     "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+                    "possible_outputs": [tf.map_fn(tf.image.encode_png, possible_output, dtype=tf.string, name="possible_output_png") for possible_output in deprocessed_possible_outputs],
                     "real_sketches": tf.map_fn(tf.image.encode_png, deprocessed_real_sketches, dtype=tf.string, name="real_sketches_pngs"),
                     "fake_sketches": tf.map_fn(tf.image.encode_png, deprocessed_fake_sketches, dtype=tf.string, name="fake_sketches_pngs"),
                 }
@@ -1060,6 +1175,8 @@ def main():
                     "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+                    "possible_outputs": [tf.map_fn(tf.image.encode_png, possible_output, dtype=tf.string, name="possible_output_png") for possible_output in deprocessed_possible_outputs],
+                    # tf.map_fn(lambda possible_output: tf.map_fn(tf.image.encode_png, possible_output, dtype=tf.string, name="possible_output_png"),tf.stack(deprocessed_possible_outputs), name='possible_output_pngs'),
                 }
         else:
             if a.use_sketch_loss:
@@ -1068,6 +1185,7 @@ def main():
                     "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+                    "possible_outputs": [tf.map_fn(tf.image.encode_png, possible_output, dtype=tf.string, name="possible_output_png") for possible_output in deprocessed_possible_outputs],
                     "real_sketches": tf.map_fn(tf.image.encode_png, deprocessed_real_sketches, dtype=tf.string, name="real_sketches_pngs"),
                     "fake_sketches": tf.map_fn(tf.image.encode_png, deprocessed_fake_sketches, dtype=tf.string, name="fake_sketches_pngs"),
                 }
@@ -1077,6 +1195,7 @@ def main():
                     "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
+                    "possible_outputs": [tf.map_fn(tf.image.encode_png, possible_output, dtype=tf.string, name="possible_output_png") for possible_output in deprocessed_possible_outputs],
                 }
 
 
@@ -1092,6 +1211,10 @@ def main():
 
     with tf.name_scope("outputs_summary"):
         tf.summary.image("outputs", deprocessed_outputs)
+
+    for output_i in range(a.num_outputs):
+        with tf.name_scope("possible_output_%d_summary" %(output_i)):
+            tf.summary.image("possible_output_%d", deprocessed_possible_outputs[output_i])
 
     if a.use_sketch_loss:
         with tf.name_scope("real_sketches_summary"):
@@ -1229,6 +1352,7 @@ def main():
                 fetches = {
                     "train": model.train,
                     "global_step": sv.global_step,
+                    "output_chosen_index": model.output_chosen_index,
                 }
 
                 if should(a.progress_freq):
@@ -1244,19 +1368,8 @@ def main():
                 if should(a.display_freq):
                     fetches["display"] = display_fetches
 
-                # Without this step the hints won't be updated.
-                # if a.use_hint:
-                #     fetches["inputs"] = examples.inputs
-                #     fetches["update_hint"] = examples.input_hints
-                #     fetches["deprocessed_hints"] = deprocessed_hints
-
-                # results = sess.run(fetches, options=options, run_metadata=run_metadata,
-                #                    feed_dict={input_ph:io_results["inputs"], target_ph:io_results["targets"]})
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
-
-                # print(np.sum(results["update_hint"]))
-                # print(np.sum(results["inputs"][...,1:]))
-                # print(np.sum(results["deprocessed_hints"]))
+                # print(results["output_chosen_index"])
 
                 if should(a.summary_freq):
                     sv.summary_writer.add_summary(results["summary"], results["global_step"])
@@ -1296,23 +1409,24 @@ main()
 """
 """
 # Sanity check
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_tri_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode train --output_dir sanity_check_train_tri --input_dir multi_possiblity_sanity_check_combined/ --which_direction AtoB --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.25 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --lab_colorization --display_freq=10 --max_epochs=5000 --scale_size=143 --crop_size=128
 # Train
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_tri --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
 # Train 512
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger --from_128
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger_tri --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger_tri --from_128
 # TO train a network that turns colored images into sketches:
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
 
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/test/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_tri_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode test --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_tri_train_sketch_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/test/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_tri_train_sketch
 # Test
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_tri_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_tri
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_tri_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_tri --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_tri_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_tri --user_hint_path=BLANK
 
 # Create the new sketch database.
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/new_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --single_input
+python pix2pix_w_hint_lab_wgan_larger_tri.py --mode test --output_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/new_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_tri_train_sketch --single_input
 """
 
 """

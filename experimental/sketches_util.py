@@ -152,7 +152,7 @@ def detect_complicated_img(file, threshold = 10.0):
         return True
 
 def training_data_clean(data_folder, start_percentage = 0.0):
-    all_img_paths = get_all_image_paths_in_dir(data_folder)
+    all_img_paths = get_all_image_paths(data_folder)
     print('Read %d images.' %len(all_img_paths))
     if start_percentage != 0.0:
         all_img_paths = all_img_paths[int(len(all_img_paths) * start_percentage / 100.0):]
@@ -213,7 +213,7 @@ def read_resize_and_save_batch_images_with_sketches(dirs, height, width, save_pa
 
 def preprocess_img_in_dir_and_save(directory, height, width, save_dir, batch_size, max_size_g=32):
     assert save_dir[-1] == '/'
-    all_img_dirs = get_all_image_paths_in_dir(directory)
+    all_img_dirs = get_all_image_paths(directory)
     num_images = len(all_img_dirs)
     image_per_file = max_size_g * (1024 ** 3) / (height * width * (1 + 3) * 1)
     # Make sure that each file contains number of images that is divisible by batch size.
@@ -278,7 +278,7 @@ def calc_rgb_bin_distr_and_weights(directory, save_dir, bin_num = 6, lambd = 0.5
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    all_img_dirs = get_all_image_paths_in_dir(directory)
+    all_img_dirs = get_all_image_paths(directory)
     random.shuffle(all_img_dirs)
     all_img_dirs = all_img_dirs[:len(all_img_dirs) / 10] # Only sample 10% of all the images to save time.
     num_imgs = len(all_img_dirs)
@@ -325,7 +325,7 @@ def calc_ab_bin_distr_and_weights(directory, save_dir, lambd = 0.5):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    all_img_dirs = get_all_image_paths_in_dir(directory)
+    all_img_dirs = get_all_image_paths(directory)
     random.shuffle(all_img_dirs)
     all_img_dirs = all_img_dirs[:len(all_img_dirs) / 10] # Only sample 10% of all the images to save time.
     num_imgs = len(all_img_dirs)

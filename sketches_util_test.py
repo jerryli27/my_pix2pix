@@ -36,7 +36,7 @@ class TestImageToSketchesUtil(unittest.TestCase):
     #
     #
     # def test_detect_bw(self):
-    #     all_img_paths = general_util.get_all_image_paths_in_dir('/home/xor/pixiv_testing_renamed/')
+    #     all_img_paths = general_util.get_all_image_paths('/home/xor/pixiv_testing_renamed/')
     #
     #     for img_path in all_img_paths[:10]:
     #         print(img_path)
@@ -55,7 +55,7 @@ class TestImageToSketchesUtil(unittest.TestCase):
     #
     # def test_detect_complicated_img(self):
     #
-    #     all_img_paths = general_util.get_all_image_paths_in_dir('/home/xor/pixiv_images/train_images/')
+    #     all_img_paths = general_util.get_all_image_paths('/home/xor/pixiv_images/train_images/')
     #
     #     for img_path in all_img_paths[10:]:
     #         print(img_path)

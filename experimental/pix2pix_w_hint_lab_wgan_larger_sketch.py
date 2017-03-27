@@ -21,7 +21,7 @@ import time
 import urllib
 
 from general_util import imread, get_all_image_paths
-from neural_util import decode_image, decode_image_with_file_name
+from neural_util import decode_image
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
@@ -265,7 +265,7 @@ def load_examples(user_hint = None):
     #     input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
     #     decode = tf.image.decode_png
     input_paths = get_all_image_paths(a.input_dir)
-    decode = decode_image_with_file_name
+    decode = decode_image
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -285,7 +285,7 @@ def load_examples(user_hint = None):
         path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
-        raw_input = decode(contents, paths, channels=3)
+        raw_input = decode(contents)
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -585,93 +585,6 @@ def create_model(inputs, targets):
             sketch = sketch[0]
         return sketch
 
-    def create_sketch_generator(generator_inputs, generator_outputs_channels, trainable = True):
-        layers = []
-        generator_ngf = 64
-
-        # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
-        with tf.variable_scope("encoder_1"):
-            output = conv(generator_inputs, generator_ngf, stride=2, trainable=trainable)
-            layers.append(output)
-        layer_specs = [
-            generator_ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-            generator_ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-            generator_ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-            generator_ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-            generator_ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-            generator_ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-        ]
-        # else:
-        #     layer_specs = [
-        #         generator_ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-        #         generator_ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-        #         generator_ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-        #         generator_ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-        #         generator_ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-        #         generator_ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-        #         generator_ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
-        #     ]
-
-        for out_channels in layer_specs:
-            with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-                rectified = lrelu(layers[-1], 0.2)
-                # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-                convolved = conv(rectified, out_channels, stride=2, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
-                layers.append(output)
-
-        layer_specs = [
-            (generator_ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-            (generator_ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-            (generator_ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-            (generator_ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-            (generator_ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-            (generator_ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-        ]
-        # else:
-        #     layer_specs = [
-        #         (generator_ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-        #         (generator_ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-        #         (generator_ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-        #         (generator_ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-        #         (generator_ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-        #         (generator_ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-        #         (generator_ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-        #     ]
-        num_encoder_layers = len(layers)
-        for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
-            skip_layer = num_encoder_layers - decoder_layer - 1
-            with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-                if decoder_layer == 0:
-                    # first decoder layer doesn't have skip connections
-                    # since it is directly connected to the skip_layer
-                    input = layers[-1]
-                else:
-                    # Can't find concat_v2 so commenting this out.
-                    #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
-                    input = tf.concat(3, [layers[-1], layers[skip_layer]])
-
-                rectified = tf.nn.relu(input)
-                # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-                output = deconv(rectified, out_channels, trainable=trainable)
-                output = batchnorm(output, trainable=trainable)
-
-                if dropout > 0.0:
-                    output = tf.nn.dropout(output, keep_prob=1 - dropout)
-
-                layers.append(output)
-
-        # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
-        with tf.variable_scope("decoder_1"):
-            #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
-            input = tf.concat(3,[layers[-1], layers[0]])
-            rectified = tf.nn.relu(input)
-            output = deconv(rectified, generator_outputs_channels, trainable=trainable)
-            output = tf.tanh(output)
-            layers.append(output)
-
-        return layers[-1]
-
     def create_discriminator(discrim_inputs, discrim_targets):
         n_layers = 3
         layers = []
@@ -746,11 +659,11 @@ def create_model(inputs, targets):
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            # fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
-            fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
+            fake_sketches = create_generator(outputs, 1, trainable=False)
+            # fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            # real_sketches = create_sketch_generator(targets, 1, trainable=False)
-            real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
+            real_sketches = create_generator(targets, 1, trainable=False)
+            # real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -1143,30 +1056,33 @@ def main():
             saver = tf.train.Saver(max_to_keep=1)
             saver.save(sess,checkpoint)
     else:
-        # # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        # if a.use_sketch_loss: # and a.checkpoint is None:
-        #     sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-        #     # This is a sanity check to make sure sketch variables are not trainable.
-        #     assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-        #                                    scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
-        #     other_var = [var for var in tf.global_variables() if
-        #                  (var not in sketch_var)]
-        #     print("number of sketch var = %d, number of other var = %d"
-        #           % (len(sketch_var), len(other_var)))
-        #     assert len(sketch_var) != 0
-        #     saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
-        #     with tf.Session(config=config) as sess:
-        #         print("loading sketch generator model from checkpoint")
-        #         pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
-        #         saver.restore(sess, pretrained_sketch_checkpoint)
-        #         sess.run(tf.initialize_variables(other_var))
-        #         saver = tf.train.Saver(max_to_keep=1)
-        # else:
-        #     saver = tf.train.Saver(max_to_keep=1)
-        sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-        if not a.train_sketch:
-            assert len(sketch_var) == 0
-        saver = tf.train.Saver(max_to_keep=1)
+        # If there is a checkpoint, then the sketch generator variables should already be stored in there.
+        if a.use_sketch_loss: # and a.checkpoint is None:
+            sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+            # This is a sanity check to make sure sketch variables are not trainable.
+            assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                           scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
+            other_var = [var for var in tf.global_variables() if
+                         (var not in sketch_var)]
+            print("number of sketch var = %d, number of other var = %d"
+                  % (len(sketch_var), len(other_var)))
+            assert len(sketch_var) != 0
+            saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
+            with tf.Session(config=config) as sess:
+                print("loading sketch generator model from checkpoint")
+                pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
+                saver.restore(sess, pretrained_sketch_checkpoint)
+                sess.run(tf.initialize_variables(other_var))
+                sketch_var_value_before = sketch_var[0].eval()[0, 0, 0, 0]
+                print("Sketch var value before supervised session: %f" %(sketch_var_value_before))
+                saver = tf.train.Saver(max_to_keep=1)
+                saver.save(sess,save_path=os.path.join(a.output_dir, "model"))
+        else:
+            saver = tf.train.Saver(max_to_keep=1)
+        # sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+        # if not a.train_sketch:
+        #     assert len(sketch_var) == 0
+        # saver = tf.train.Saver(max_to_keep=1)
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
@@ -1177,6 +1093,17 @@ def main():
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
             saver.restore(sess, checkpoint)
+        elif a.use_sketch_loss:
+            print("loading model with saved sketch generator variables.")
+            checkpoint = tf.train.latest_checkpoint(a.output_dir)
+            print(checkpoint)
+            assert checkpoint is not None
+            saver.restore(sess, checkpoint)
+
+            sketch_var_value_after = sketch_var[0].eval(session=sess)[0, 0, 0, 0]
+            print("Sketch var value after supervised session: %f" %(sketch_var_value_after))
+            assert sketch_var_value_after == sketch_var_value_before
+
 
 
         if a.mode == "test":
@@ -1224,8 +1151,6 @@ def main():
                 #
                 # print(np.sum(io_results["inputs"][...,1:]))
                 # print(np.sum(io_results["targets"]))
-
-
                 fetches = {
                     "train": model.train,
                     "global_step": sv.global_step,
@@ -1296,23 +1221,23 @@ main()
 """
 """
 # Sanity check
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sketch_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.1 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --use_hint --lab_colorization
 # Train
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --use_hint --lab_colorization
 # Train 512
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger --from_128
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger_sketch --from_128
 # TO train a network that turns colored images into sketches:
 python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
 
-python pix2pix_w_hint_lab_wgan_larger.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/test/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode test --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_train_sketch_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/test/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_train_sketch
 # Test
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch --user_hint_path=BLANK
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch --user_hint_path=BLANK
 
 # Create the new sketch database.
-python pix2pix_w_hint_lab_wgan_larger.py --mode test --output_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/new_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --single_input
+python pix2pix_w_hint_lab_wgan_larger_sketch.py --mode test --output_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/new_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_train_sketch --single_input
 """
 
 """
