@@ -2,6 +2,9 @@
 This file is for preprocessing image files that you have and convert them to formats that can be processed by the
 Paints Sketch program. It does a few preprocessing steps by default, like filtering out images with a wierd height to
 width ratio, filter out black and white images, and many more.
+Example usage:
+
+python preprocess.py --input_dir=pixiv_downloaded/ --output_dir=pixiv_new_128/ --size=128 --resize_mode=reshape
 """
 
 from __future__ import absolute_import
@@ -42,27 +45,27 @@ parser.add_argument("--no_face_detection", action="store_true", help="If set to 
 parser.add_argument("--gen_sketch", action="store_true", help="If set to be true, sketches are generated along "
                                                                      "with the resized colored image."
                                                                      "Default is not save sketch")
-parser.add_argument("--size", type=int, default=256, help="size to use for resize operation")
-parser.add_argument("--verbose", action="store_true", help="If not set, then only print how many images it has processed. Otherwise print each file processed.")
-parser.add_argument("--gpu_limit", type=float, default=0.5, help="The percentage of gpu this program can use.")
+parser.add_argument("--size", type=int, default=128, help="size to use for resize operation")
+parser.add_argument("--verbose", action="store_true",
+                    help="If set, it prints the file name of each image processed. The default is to only print "
+                         "the number of images it has processed. ")
+parser.add_argument("--gpu_limit", type=float, default=0.1,
+                    help="The percentage of gpu this program can use. Set to <= 0 for cpu mode.")
 parser.add_argument("--output_list_only", action="store_true",
-                    help="If set to be true, then the only output is a list of images that passed the tests.")
+                    help="If set, then the only output is a list of image file names that passed the tests. "
+                         "The default is to output the resized images as well.")
 a = parser.parse_args()
 
 if a.output_list_only and a.gen_sketch:
     parser.error("output_list_only cannot be used together with gen_sketch. If you would like to generate a list of "
                  "images passing the tests, please take off the gen_sketch flag.")
-# if a.output_list_only and not os.path.isfile(a.output_dir):
-#     parser.error("output_list_only flag is turned on. Do not provide a directory. "
-#                  "Please provide a path to the file name to save the list of image paths instead. ")
-
-
 
 def main():
     random.seed(0)
 
-    color_dir = os.path.join(a.output_dir,"color")
-    sketch_dir = os.path.join(a.output_dir,"sketch")
+    color_dir = os.path.join(a.output_dir,"color")  # Directory to save the colored image files.
+    sketch_dir = os.path.join(a.output_dir,"sketch")  # Directory to save the generated sketch image files.
+    combined_dir = os.path.join(a.output_dir,"combined")  # Directory to save the combined sketch and colored image file.
     if a.output_list_only:
         if not os.path.exists(os.path.dirname(a.output_dir)):
             os.makedirs(os.path.dirname(a.output_dir))
@@ -73,6 +76,8 @@ def main():
             os.makedirs(color_dir)
         if not os.path.exists(sketch_dir):
             os.makedirs(sketch_dir)
+        if not os.path.exists(combined_dir):
+            os.makedirs(combined_dir)
 
     if a.gpu_limit <= 0.0:
         print('Using cpu mode.')
@@ -85,6 +90,7 @@ def main():
     else:
         raise AssertionError('The gpu limit is invalid. It must be between 0 and 1. It is now %f' %a.gpu_limit)
 
+    # Preload the anime face cascade classifier.
     if not a.no_face_detection:
         cascade_file = "./lbpcascade_animeface.xml"
         if not os.path.isfile(cascade_file):
@@ -113,13 +119,14 @@ def main():
         paths, contents = reader.read(filename_queue)
         src = load(paths, contents, channels=3)
         height, width = get_image_hw(src)
-        # paths, src = tf.train.batch([paths, src], batch_size=a.batch_size)
         hw_ratio_test_result = pass_hw_test(height, width, a.hw_ratio_threshold)
         resized_image = tf.cond(hw_ratio_test_result, lambda: resize_image(src,height,width, a.resize_mode, a.size), lambda: tf.constant(0.0))
         sketch = sketch_extractor(src, color_space="rgb", max_val=1.0, min_val=0.0)
         sketch_resized = tf.cond(hw_ratio_test_result, lambda: resize_image(sketch,height,width, a.resize_mode, a.size), lambda: tf.constant(0.0))
+        combined_image = tf.cond(hw_ratio_test_result, lambda: tf.concat(1,(sketch_resized, resized_image)), lambda: tf.constant(0.0))
         resized_image_encoded = tf.cond(hw_ratio_test_result, lambda: tf.image.encode_png(tf.image.convert_image_dtype(resized_image, dtype=tf.uint8),name="output_pngs"), lambda: tf.constant("", dtype=tf.string))
         sketch_resized_encoded = tf.cond(hw_ratio_test_result, lambda: tf.image.encode_png(tf.image.convert_image_dtype(sketch_resized, dtype=tf.uint8),name="sketch_pngs"), lambda: tf.constant("", dtype=tf.string))
+        combined_image_encoded = tf.cond(hw_ratio_test_result, lambda: tf.image.encode_png(tf.image.convert_image_dtype(combined_image, dtype=tf.uint8),name="combined_pngs"), lambda: tf.constant("", dtype=tf.string))
 
         if a.allow_bw:
             bw_test_result = tf.constant(True)
@@ -134,12 +141,13 @@ def main():
             if not a.output_list_only:
                 dst_path = png_path(os.path.join(color_dir, os.path.basename(src_path)))
                 dst_sketch_path = png_path(os.path.join(sketch_dir, os.path.basename(src_path)))
+                dst_combined_path = png_path(os.path.join(combined_dir, os.path.basename(src_path)))
+
             if not a.verbose:
                 if image_i % 100 == 0:
                     current_time = time.time()
                     remaining_time = 0.0 if image_i == 0 else (num_images - image_i) * (float(current_time - start_time) / image_i)
                     print('%.3f%% done. Remaining time: %.1fs' % (float(image_i) / num_images * 100, remaining_time))
-                    # print("Processed %d images." %image_i)
             else:
                 if a.output_list_only:
                     print(src_path)
@@ -157,8 +165,8 @@ def main():
                 if not a.output_list_only:
                     fetches["dst_encoded"] = resized_image_encoded
                     if a.gen_sketch:
-                        # fetches["dst_sketch"] = sketch_resized
                         fetches["dst_sketch_encoded"] = sketch_resized_encoded
+                        fetches["combined_image_encoded"] = combined_image_encoded
                 results = sess.run(fetches)
                 assert results["paths"] == src_path
                 if results["hw_ratio_test_result"]:
@@ -174,6 +182,7 @@ def main():
                                 save(results["dst_encoded"], dst_path)
                                 if a.gen_sketch:
                                     save(results["dst_sketch_encoded"], dst_sketch_path)
+                                    save(results["combined_image_encoded"], dst_combined_path)
                                 src_txt_path = src_path+"txt"
                                 if os.path.isfile(src_txt_path):
                                     copy(src_txt_path, dst_path+".txt")
@@ -186,10 +195,6 @@ def main():
         coord.request_stop()
         coord.join(threads)
         sess.close()
+
 if __name__ == "__main__":
     main()
-    # In the previous version it takes around 4 hours to process 50000 images with no face detection...
-
-"""
-python preprocess.py --input_dir=/mnt/pixiv_drive/home/ubuntu/PycharmProjects/PixivUtil2/pixiv_downloaded/ --output_dir=/mnt/data_drive/home/ubuntu/pixiv_new_128/ --size=128 --resize_mode=reshape --gpu_limit=0.25
-"""

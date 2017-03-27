@@ -1,3 +1,6 @@
+"""
+This file is for testing trained models by feeding them various types of input images.
+"""
 import os
 import shutil
 
@@ -55,7 +58,7 @@ input_type_sketch_modes = {"colored_combined": ["old_sketch", "input_sketch"],
                          }
 
 
-checkpoint_subdir = "pixiv_new_128_w_hint_lab_wgan_larger_sketch_mix_cont_x4_l1_40_with_hint"
+checkpoint_subdir = "pixiv_new_128_w_hint_lab_wgan_larger_sketch_mix_cond_cont_x4_l1_40_with_hint"
 
 result_page_dir = "result_page/%s_test" % (checkpoint_subdir)
 if not os.path.isdir(result_page_dir):
