@@ -123,7 +123,7 @@ def main():
         resized_image = tf.cond(hw_ratio_test_result, lambda: resize_image(src,height,width, a.resize_mode, a.size), lambda: tf.constant(0.0))
         sketch = sketch_extractor(src, color_space="rgb", max_val=1.0, min_val=0.0)
         sketch_resized = tf.cond(hw_ratio_test_result, lambda: resize_image(sketch,height,width, a.resize_mode, a.size), lambda: tf.constant(0.0))
-        combined_image = tf.cond(hw_ratio_test_result, lambda: tf.concat(1,(sketch_resized, resized_image)), lambda: tf.constant(0.0))
+        combined_image = tf.cond(hw_ratio_test_result, lambda: tf.concat(1,(tf.concat(2,(sketch_resized,sketch_resized,sketch_resized)) , resized_image)), lambda: tf.constant(0.0))
         resized_image_encoded = tf.cond(hw_ratio_test_result, lambda: tf.image.encode_png(tf.image.convert_image_dtype(resized_image, dtype=tf.uint8),name="output_pngs"), lambda: tf.constant("", dtype=tf.string))
         sketch_resized_encoded = tf.cond(hw_ratio_test_result, lambda: tf.image.encode_png(tf.image.convert_image_dtype(sketch_resized, dtype=tf.uint8),name="sketch_pngs"), lambda: tf.constant("", dtype=tf.string))
         combined_image_encoded = tf.cond(hw_ratio_test_result, lambda: tf.image.encode_png(tf.image.convert_image_dtype(combined_image, dtype=tf.uint8),name="combined_pngs"), lambda: tf.constant("", dtype=tf.string))

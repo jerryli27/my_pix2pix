@@ -135,8 +135,8 @@ def resize_image(image, height, width, resize_mode, new_size):
         return dst
     else:
         raise AttributeError("Resize mode %s not supported." %(resize_mode))
-    new_size = tf.shape(dst, name="resized_image_shape")[0]
-    dst = tf.cond(tf.greater_equal(new_size, new_size),
+    square_size = tf.shape(dst, name="resized_image_shape")[0]
+    dst = tf.cond(tf.greater_equal(new_size, square_size),
                   lambda: tf.image.resize_images(dst, size=[new_size, new_size],
                                                           method=tf.image.ResizeMethod.AREA, ),
                   lambda: tf.image.resize_images(dst, size=[new_size, new_size],

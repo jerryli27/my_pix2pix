@@ -16,6 +16,8 @@ input_dirs = ["/mnt/06CAF857CAF84489/datasets/mnt/data_drive/home/ubuntu/pixiv_n
               "/mnt/06CAF857CAF84489/datasets/shirobako_training_dataset/shirobako01pic_random100_128",
               "/mnt/06CAF857CAF84489/datasets/Demi-chan_wa_Kataritai/ed_resized",
               "/mnt/06CAF857CAF84489/datasets/Demi-chan_wa_Kataritai/ed_cleaned",
+              "/media/jerryli27/1ACC040DCC03E1BD/pixiv_datasets/sketch_colored_pair_128_combined/test",
+              "test_collected_sketches_cropped_old_sketch/sketch",
               ]
 
 output_subdirs = ["test",
@@ -30,6 +32,8 @@ output_subdirs = ["test",
                   "test_shirobako",
                   "test_demichan_original",
                   "test_demichan_cleaned",
+                  "test_sketch_colored_pair",
+                  "test_collected_sketches_cropped_old_sketch",
                   ]
 
 input_types = ["colored_combined",   # Modes: no hint, with hint, old sketch, new sketch
@@ -43,6 +47,8 @@ input_types = ["colored_combined",   # Modes: no hint, with hint, old sketch, ne
                # "sketches_single",    # Modes: no hint, input_sketch
                "colored_single",     # Modes: no hint, with hint, old sketch,
                "colored_single",     # Modes: no hint, with hint, old sketch,
+               "sketches_single",    # Modes: no hint, input_sketch
+               "colored_combined",  # Modes: no hint, input_sketch
                "sketches_single",    # Modes: no hint, input_sketch
                ]
 
@@ -58,13 +64,13 @@ input_type_sketch_modes = {"colored_combined": ["old_sketch", "input_sketch"],
                          }
 
 
-checkpoint_subdir = "pixiv_new_128_w_hint_lab_wgan_larger_sketch_mix_cond_cont_x4_l1_40_with_hint"
+checkpoint_subdir = "pixiv_new_128_w_hint_lab_wgan_larger_sketch_mix_cond_refactored_dilation_deeper_contx3_no_h_no_m_no_l1_10_gen_0p2"
 
 result_page_dir = "result_page/%s_test" % (checkpoint_subdir)
 if not os.path.isdir(result_page_dir):
     os.mkdir(result_page_dir)
 
-for i in range(len(input_dirs)):
+for i in range(len(input_dirs)): # [6]:
     for hint_mode in input_type_hint_modes[input_types[i]]:
         if hint_mode == "no_hint":
             hint_prob = -1
@@ -85,10 +91,10 @@ for i in range(len(input_dirs)):
             if not os.path.isdir(output_dir):
                 os.mkdir(output_dir)
             single_input_string = "--single_input" if input_types[i].endswith("single") else ""
-            os.system("/usr/bin/python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir "
+            os.system("/usr/bin/python pix2pix_w_hint_lab_wgan_larger_sketch_mix_cond_refactored_dilation_deeper.py --mode test --output_dir "
                       "%s "
                       "--max_epochs 20 --input_dir %s --which_direction AtoB "
-                      "--display_freq=1000 --gray_input_a --batch_size 16 --lr 0.0008 --gpu_percentage 0.25 "
+                      "--display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.4 "
                       "--scale_size=143 --crop_size=128 --use_sketch_loss "
                       "--pretrained_sketch_net_path checkpoints/sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch "
                       "--use_hint --lab_colorization --sketch_weight=10.0 --hint_prob=%f --gan_weight=5.0 "

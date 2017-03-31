@@ -132,7 +132,13 @@ def sketch_extractor(images, color_space, max_val=1.0, min_val=-1.0):
     filt = np.expand_dims(np.array([[1, 1, 1],
                                     [1, 1, 1],
                                     [1, 1, 1]],
-                                   np.uint8), axis=2)
+                                    np.uint8), axis=2)
+    # filt = np.expand_dims(np.array([[1, 1, 1, 1, 1],
+    #                                 [1, 1, 1, 1, 1],
+    #                                 [1, 1, 1, 1, 1],
+    #                                 [1, 1, 1, 1, 1],
+    #                                 [1, 1, 1, 1, 1],],
+    #                                np.uint8), axis=2)
     stride = 1
     rate = 1
     padding = 'SAME'
