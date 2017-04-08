@@ -12,7 +12,7 @@ import numpy as np
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
 parser.add_argument("--output_dir", required=True, help="output path")
-parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine"])
+parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine", "split"])
 parser.add_argument("--image_list_path", help="path to a file containing the path to images under `input-dir`")
 parser.add_argument("--pad", action="store_true", help="pad instead of crop for resize operation")
 parser.add_argument("--size", type=int, default=256, help="size to use for resize operation")
@@ -291,6 +291,32 @@ def main():
                     sibling = np.repeat(sibling, repeats=3, axis=2)
 
                 dst = np.concatenate([src, sibling], axis=1)
+
+
+            elif a.operation == "split":
+                # If for some reason you want to split the output of "combined" option back into two images.
+                if a.b_dir is None:
+                    raise Exception("missing b_dir")
+
+                # make sure that dimensions are correct
+                height, width, _ = src.shape
+                if height != width / 2:
+                    raise Exception("Incorrect height and width: %d and %d. Width should be twice the height."
+                                    %(height, width))
+
+                # remove alpha channel
+
+                colored_path = png_path(os.path.join(a.b_dir, os.path.basename(src_path)))
+                if os.path.isfile(dst_path) and os.path.isfile(colored_path):
+                    continue
+
+                sketch = src[:,:height,:3]
+                colored = src[:,height:,:3]
+
+                save(sketch, dst_path)
+                save(colored, colored_path)
+                continue
+
             else:
                 raise Exception("invalid operation")
 

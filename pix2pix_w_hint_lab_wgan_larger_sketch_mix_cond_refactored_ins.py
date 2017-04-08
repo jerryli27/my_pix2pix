@@ -125,10 +125,9 @@ parser.add_argument("--mix_prob", type=float, default=0.5,
                          "provided input sketches.")
 
 a = parser.parse_args()
-# assert a.mix_prob >= 1
 
-# if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
-#     parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
+if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
+    parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
 if a.gen_sketch_input and not a.use_sketch_loss:
     parser.error("If you want to use gen_sketch_input, please also turn on sketch loss.")
 if a.gen_sketch_input and a.mix_prob > 0:
@@ -179,6 +178,33 @@ def lrelu(x, a):
         x = tf.identity(x)
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
 
+def instance_norm(input, trainable=True):
+    # type: (tf.Tensor, Union[None,tf.Tensor], bool) -> tf.Tensor
+    """
+    For the purpose of this function, please refer to the paper
+    "Instance Normalization - The Missing Ingredient for Fast Stylization"
+    TODO: maybe there's something wrong with the description. It might not be exactly instance norm.
+    :param input:
+    :param trainable:
+    :return:
+    """
+    with tf.variable_scope("instance_norm"):
+        # this block looks like it has 3 inputs on the graph unless we do this
+        input = tf.identity(input)
+        channels = input.get_shape()[3]
+        var_shape = [channels]
+        offset = tf.get_variable("offset", var_shape, dtype=tf.float32, initializer=tf.zeros_initializer,
+                                 trainable=trainable)
+        scale = tf.get_variable("scale", var_shape, dtype=tf.float32,
+                                initializer=tf.random_normal_initializer(1.0, 0.02), trainable=trainable)
+        mu, sigma_sq = tf.nn.moments(input, [1, 2], keep_dims=True)
+        # Try applying an abs on the sigma_sq. in theory it should always be positive but in practice due to inaccuracy
+        # in float calculation, it may be negative when the actual sigma is very small, which causes the output to be
+        # NaN sometimes. It's probably a bug on tensorflow's side.
+        sigma_sq = tf.abs(sigma_sq)
+        epsilon = 1e-5
+        normalized = (input - mu) / (sigma_sq + epsilon) ** (.5)
+        return scale * normalized + offset
 
 def batchnorm(input, trainable=True):
     with tf.variable_scope("batchnorm"):
@@ -476,7 +502,7 @@ def create_model(inputs, targets, is_hint_off=None):
         # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
         with tf.variable_scope("encoder_1"):
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            output = batchnorm(convolved, trainable=trainable)
+            output = instance_norm(convolved, trainable=trainable)
             rectified = tf.nn.relu(output)  #TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
             layers.append(rectified)
 
@@ -498,7 +524,7 @@ def create_model(inputs, targets, is_hint_off=None):
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
+                output = instance_norm(convolved, trainable=trainable)
                 rectified = tf.nn.relu(output)
                 layers.append(rectified)
         
@@ -529,7 +555,7 @@ def create_model(inputs, targets, is_hint_off=None):
                         input = tf.concat(3, [layers[-1], layers[skip_layer]])
                     # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
                     output = deconv(input, out_channels, 2, 4, trainable=trainable)
-                output = batchnorm(output, trainable=trainable)
+                output = instance_norm(output, trainable=trainable)
                 output = tf.nn.relu(output)
                 layers.append(output)
 
@@ -550,7 +576,7 @@ def create_model(inputs, targets, is_hint_off=None):
         # layer_1: [batch, h, w, in_channels * 2] => [batch, h/2, w/2, ndf]
         with tf.variable_scope("layer_1"):
             convolved = conv(input, a.ndf, stride=2, shift=4)
-            normed = batchnorm(convolved)
+            normed = instance_norm(convolved)
             rectified = lrelu(normed, 0.2)
             layers.append(rectified)
 
@@ -574,8 +600,8 @@ def create_model(inputs, targets, is_hint_off=None):
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=2, shift=4)
 
-                normed = batchnorm(convolved)
-                rectified = tf.nn.relu(normed)
+                normed = instance_norm(convolved)
+                rectified = lrelu(normed, 0.2)
                 layers.append(rectified)
 
         # layer_5: [batch, h/8, h/8, ndf * 8] => [batch, h/8, h/8, 1]
@@ -586,13 +612,84 @@ def create_model(inputs, targets, is_hint_off=None):
 
         return layers[-1]
 
+    def create_sketch_generator(generator_inputs, generator_outputs_channels, trainable=True):
+        layers = []
+
+        # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
+        with tf.variable_scope("encoder_1"):
+            convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
+            output = batchnorm(convolved, trainable=trainable)
+            rectified = tf.nn.relu(output)  # TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
+            layers.append(rectified)
+
+        layer_specs = [
+            a.ngf * 2,  # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 2,  # encoder_3: [batch, h/2, w/2, ngf * 2] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 4,  # encoder_4: [batch, h/2, w/2, ngf * 2] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 4,  # encoder_5: [batch, h/4, w/4, ngf * 4] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 8,  # encoder_6: [batch, h/4, w/4, ngf * 4] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 8,  # encoder_7: [batch, h/8, w/8, ngf * 8] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 16,  # encoder_8: [batch, h/8, w/8, ngf * 8] => [batch, h/16, w/16, ngf * 16]
+            a.ngf * 16,  # encoder_9: [batch, h/16, w/16, ngf * 16] => [batch, h/16, w/16, ngf * 16]
+        ]
+        for out_channels in layer_specs:
+            with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(layers[-1], out_channels, stride=2, shift=4, trainable=trainable)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
+                output = batchnorm(convolved, trainable=trainable)
+                rectified = tf.nn.relu(output)
+                layers.append(rectified)
+
+        layer_specs = [
+            (a.ngf * 16),  # decoder_8: [batch, h/16, w/16, ngf * 16 * 2]=> [batch, h/8, w/8, ngf * 16]
+            (a.ngf * 8),  # decoder_7: [batch, h/8, w/8, ngf * 16] => [batch, h/8, w/8, ngf * 8]
+            (a.ngf * 8),  # decoder_6: [batch, h/8, w/8, ngf * 8 * 2] => [batch, h/4, w/4, ngf * 8]
+            (a.ngf * 4),  # decoder_5: [batch, h/4, w/4, ngf * 8] => [batch, h/4, w/4, ngf * 4]
+            (a.ngf * 4),  # decoder_4: [batch, h/4, w/4, ngf * 4 * 2] => [batch, h/2, w/2, ngf * 4]
+            (a.ngf * 2),  # decoder_3: [batch, h/2, w/2, ngf * 4] => [batch, h/2, w/2, ngf * 2]
+            (a.ngf * 2),  # decoder_2: [batch, h/2, w/2, ngf * 2 * 2] => [batch, h, w, ngf * 2]
+            (a.ngf * 1),  # decoder_1: [batch, h, w, ngf * 2] => [batch, h, w, ngf]
+        ]
+        num_encoder_layers = len(layers)
+        for decoder_layer, (out_channels) in enumerate(layer_specs):
+            skip_layer = num_encoder_layers - decoder_layer - 1
+            with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
+                if decoder_layer % 2 != 0:
+                    # first decoder layer doesn't have skip connections
+                    # since it is directly connected to the skip_layer
+                    input = layers[-1]
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    output = deconv(input, out_channels, 1, 3, trainable=trainable)
+                else:
+                    if decoder_layer == 0:
+                        input = tf.concat(3, [layers[-1], layers[-2]])
+                    else:
+                        input = tf.concat(3, [layers[-1], layers[skip_layer]])
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                    output = deconv(input, out_channels, 2, 4, trainable=trainable)
+                output = batchnorm(output, trainable=trainable)
+                output = tf.nn.relu(output)
+                layers.append(output)
+
+        # decoder_1: [batch, h/2, w/2, ngf * 2] => [batch, h, w, generator_outputs_channels]
+        with tf.variable_scope("decoder_1"):
+            input = tf.concat(3, [layers[-1], layers[0]])
+            output = deconv(input, generator_outputs_channels, 1, 3, trainable=trainable)
+            layers.append(output)
+
+        return layers[-1]
+
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            # real_sketches = create_generator(targets, 1, trainable=False)
+            real_sketches = create_sketch_generator(targets, 1, trainable=False)
             # The commented out piece of code is for using the dilation sketch generation instead of the pretrained
             # sketch generator. TWhen the input image does not contain information about the background, the pretrained
             # sketch generator works better because it ignores the background when generating sketches.
-            real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
+            # real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
 
     with tf.variable_scope("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
         out_channels = int(targets.get_shape()[-1])
@@ -613,9 +710,9 @@ def create_model(inputs, targets, is_hint_off=None):
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            # fake_sketches = create_generator(outputs, 1, trainable=False)
+            fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
             # Same as the real_sketches line above.
-            fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
+            # fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
 
 
     # Create two copies of the discriminator: one for real pairs and one for fake pairs.
@@ -1021,34 +1118,34 @@ def main():
             saver.save(sess,checkpoint)
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        # if a.use_sketch_loss and a.mode != "test": # and a.checkpoint is None:
-        #     sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-        #     # This is a sanity check to make sure sketch variables are not trainable.
-        #     assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-        #                                    scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
-        #     other_var = [var for var in tf.global_variables() if
-        #                  (var not in sketch_var)]
-        #     print("number of sketch var = %d, number of other var = %d"
-        #           % (len(sketch_var), len(other_var)))
-        #     assert len(sketch_var) != 0
-        #     saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
-        #     with tf.Session(config=config) as sess:
-        #         print("loading sketch generator model from checkpoint")
-        #         pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
-        #         saver.restore(sess, pretrained_sketch_checkpoint)
-        #         sess.run(tf.initialize_variables(other_var))
-        #         sketch_var_value_before = sketch_var[0].eval()[0, 0, 0, 0]
-        #         print("Sketch var value before supervised session: %f" %(sketch_var_value_before))
-        #         saver = tf.train.Saver(max_to_keep=1)
-        #         saver.save(sess,save_path=os.path.join(a.output_dir, "model"))
-        # else:
-        #     saver = tf.train.Saver(max_to_keep=1)
+        if a.use_sketch_loss and a.mode != "test": # and a.checkpoint is None:
+            sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+            # This is a sanity check to make sure sketch variables are not trainable.
+            assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                           scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
+            other_var = [var for var in tf.global_variables() if
+                         (var not in sketch_var)]
+            print("number of sketch var = %d, number of other var = %d"
+                  % (len(sketch_var), len(other_var)))
+            assert len(sketch_var) != 0
+            saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
+            with tf.Session(config=config) as sess:
+                print("loading sketch generator model from checkpoint")
+                pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
+                saver.restore(sess, pretrained_sketch_checkpoint)
+                sess.run(tf.initialize_variables(other_var))
+                sketch_var_value_before = sketch_var[0].eval()[0, 0, 0, 0]
+                print("Sketch var value before supervised session: %f" %(sketch_var_value_before))
+                saver = tf.train.Saver(max_to_keep=1)
+                saver.save(sess,save_path=os.path.join(a.output_dir, "model"))
+        else:
+            saver = tf.train.Saver(max_to_keep=1)
         # The code commented out is for when one wants to switch from the pretrained sketch generator for sketch loss
         # to the dilation sketch generator.
-        sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-        if not a.train_sketch:
-            assert len(sketch_var) == 0
-        saver = tf.train.Saver(max_to_keep=1)
+        # sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+        # if not a.train_sketch:
+        #     assert len(sketch_var) == 0
+        # saver = tf.train.Saver(max_to_keep=1)
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
@@ -1059,16 +1156,16 @@ def main():
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
             saver.restore(sess, checkpoint)
-        # elif a.use_sketch_loss:
-        #     print("loading model with saved sketch generator variables.")
-        #     checkpoint = tf.train.latest_checkpoint(a.output_dir)
-        #     print(checkpoint)
-        #     assert checkpoint is not None
-        #     saver.restore(sess, checkpoint)
-        #
-        #     # sketch_var_value_after = sketch_var[0].eval(session=sess)[0, 0, 0, 0]
-        #     # print("Sketch var value after supervised session: %f" %(sketch_var_value_after))
-        #     # assert sketch_var_value_after == sketch_var_value_before
+        elif a.use_sketch_loss:
+            print("loading model with saved sketch generator variables.")
+            checkpoint = tf.train.latest_checkpoint(a.output_dir)
+            print(checkpoint)
+            assert checkpoint is not None
+            saver.restore(sess, checkpoint)
+
+            sketch_var_value_after = sketch_var[0].eval(session=sess)[0, 0, 0, 0]
+            print("Sketch var value after supervised session: %f" %(sketch_var_value_after))
+            assert sketch_var_value_after == sketch_var_value_before
 
 
 

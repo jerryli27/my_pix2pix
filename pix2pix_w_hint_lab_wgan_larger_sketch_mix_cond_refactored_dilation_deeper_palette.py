@@ -127,8 +127,6 @@ parser.add_argument("--mix_prob", type=float, default=0.5,
 a = parser.parse_args()
 # assert a.mix_prob >= 1
 
-if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
-    parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
 if a.gen_sketch_input and not a.use_sketch_loss:
     parser.error("If you want to use gen_sketch_input, please also turn on sketch loss.")
 if a.gen_sketch_input and a.mix_prob > 0:
@@ -304,7 +302,7 @@ def lab_to_rgb(lab):
         return tf.reshape(srgb_pixels, tf.shape(lab))
 
 def load_examples(user_hint = None):
-    if not os.path.exists(a.input_dir):
+    if not os.path.isfile(a.input_dir):
         raise Exception("input_dir does not exist")
 
     input_paths, input_palettes = read_palette(a.input_dir)
@@ -314,9 +312,10 @@ def load_examples(user_hint = None):
         raise Exception("input_dir contains no image files")
 
     input_palettes = np.array(input_palettes)
-    if len(input_palettes.shape) != 3:
+    if len(input_palettes.shape) != 3 or input_palettes.shape[2] != 3 or input_palettes.shape[0] != len(input_paths):
         raise Exception("input_palettes has the wrong shape: %s . It shoud be (NUM_IMAGES, NUM_COLORS, 3)"
                         %(str(input_palettes.shape)))
+    num_palette_colors = input_palettes.shape[1]
 
     def get_name(path):
         name, _ = os.path.splitext(os.path.basename(path))
@@ -332,13 +331,14 @@ def load_examples(user_hint = None):
     with tf.name_scope("load_images"):
         input_queue = tf.train.slice_input_producer([input_paths, input_palettes], shuffle=a.mode == "train")
         path_queue = input_queue[0]
-        palette_queue = ((tf.to_float(input_queue[1]) / 255.0) - 0.5) * 2 # Range -1 to 1, shape [NUM_PALETTE, 3]
+        palette_queue = tf.to_float(input_queue[1]) / 255.0 # Range 0 to 1, shape [NUM_PALETTE, 3]
 
         # path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
-        reader = tf.WholeFileReader()
-        !!!!! BUG HERE
-        paths, contents = reader.read(path_queue)
-        raw_input = decode(contents, paths, channels=3)
+        # reader = tf.WholeFileReader()
+        # paths, contents = reader.read(path_queue)
+        # Can't use whole file reader, so use tf.read_file instead.
+        contents = tf.read_file(path_queue)
+        raw_input = decode(contents, path_queue, channels=3)
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -448,9 +448,30 @@ def load_examples(user_hint = None):
     def append_palettes(inputs, palettes):
         input_height = tf.shape(inputs)[0]
         input_width = tf.shape(inputs)[1]
-        palettes_flat = tf.reshape(palettes, [-1])
-        palettes_mult = tf.tile(palettes_flat, input_height * input_width, name=None)
-        palettes_mult = tf.reshape(palettes_mult, (input_height, input_width, -1))
+
+        if a.lab_colorization:
+
+            palettes_flat = tf.reshape(palettes, [num_palette_colors * 3])
+            palettes_mult = tf.reshape(palettes_flat, (1, 1, num_palette_colors, 3))
+            palettes_mult = tf.transpose(palettes_mult, perm=(2,0,1,3))
+
+
+            # Assume b image (the image on the right) is the colored image.
+            palette_lab = rgb_to_lab(palettes_mult)
+            palette_L_chan, palette_a_chan, palette_b_chan = tf.unstack(palette_lab, axis=3)
+
+            palette_L_chan = tf.expand_dims(palette_L_chan, axis=3) / 50 - 1  # black and white with input range [0, 100]
+            palette_ab_chan = tf.stack([palette_a_chan, palette_b_chan], axis=3) / 110  # color channels with input range ~[-110, 110], not exact
+            palette_lab_images = tf.concat(3, [palette_L_chan, palette_ab_chan])
+            # Now everything is under -1 to 1 scale.
+            palettes_mult = tf.transpose(palette_lab_images, perm=(1,2,0,3))
+            palettes_mult = tf.reshape(palettes_mult, (num_palette_colors * 3,))
+            palettes_mult = tf.tile(palettes_mult, [input_height * input_width], name=None)
+            palettes_mult = tf.reshape(palettes_mult, (input_height, input_width, num_palette_colors * 3))
+        else:
+            palettes_flat = tf.reshape(palettes, [num_palette_colors * 3])
+            palettes_mult = tf.tile(palettes_flat, [input_height * input_width], name=None)
+            palettes_mult = tf.reshape(palettes_mult, (input_height, input_width, num_palette_colors * 3)) * 2 - 1
         return tf.concat(2, (inputs, palettes_mult), name='palette_concat')
 
     with tf.name_scope("target_images"):
@@ -472,9 +493,9 @@ def load_examples(user_hint = None):
 
 
     if a.use_hint:
-        paths, inputs, targets, input_hints, is_hint_off = tf.train.batch([paths, input_images, target_images, input_hints, is_hint_off], batch_size=a.batch_size)
+        paths, inputs, targets, input_hints, is_hint_off = tf.train.batch([path_queue, input_images, target_images, input_hints, is_hint_off], batch_size=a.batch_size)
     else:
-        paths, inputs, targets = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
+        paths, inputs, targets = tf.train.batch([path_queue, input_images, target_images], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
 
     return Examples(
@@ -798,7 +819,7 @@ def save_images(fetches, image_dir, step=None):
         fileset = {"name": name, "step": step}
         kinds = ["outputs", ]
         if not (a.single_input and a.mode == "test"):
-            kinds = kinds + ["inputs", "targets"]
+            kinds = kinds + ["inputs", "input_palettes", "targets"]
             if a.use_hint:
                 kinds.append("hints")
             if a.use_sketch_loss:
@@ -971,11 +992,14 @@ def main():
         hint_dims = 4 if a.use_hint else 0
         input_last_dim = inputs.get_shape().as_list()[-1]
         assert (input_last_dim - 1 - hint_dims) % 3 == 0
-        num_palette_colors_in_input = (input_last_dim - 1 - hint_dims) / 3 # No sketch no hint.
+        num_palette_colors_in_input = int((input_last_dim - 1 - hint_dims) / 3) # No sketch no hint.
         palette_colors = []
+        _per_palette_hw = 16
         for i_color in range(num_palette_colors_in_input):
-            palette_colors.append(inputs[:,0:4,0:4,1+i_color*3:1+(1+i_color)*3])
-        palette_colors = tf.concat(3, (palette_colors)) # So now the palette_colors has shape [batch_size, 4, 4 * num_palette_colors, 3]
+            palette_colors.append(inputs[:,0:_per_palette_hw,0:_per_palette_hw,1+i_color*3:1+(1+i_color)*3])
+        palette_colors = tf.concat(2, (palette_colors)) # So now the palette_colors has shape [batch_size, 4, 4 * num_palette_colors, 3]
+        shape = palette_colors.get_shape().as_list()
+        assert shape[1] == _per_palette_hw and shape[2] == _per_palette_hw * num_palette_colors_in_input and shape[3] == 3
         return palette_colors
 
 
@@ -987,9 +1011,9 @@ def main():
         if a.use_hint:
             deprocessed_inputs = deprocess(examples.inputs[...,:1])
             # Separate all the palette colors.
-            deprocessed_hints = deprocess(examples.inputs[...,1:])
+            deprocessed_hints = deprocess(examples.inputs[...,-4:])
         else:
-            deprocessed_inputs = deprocess(examples.inputs)
+            deprocessed_inputs = deprocess(examples.inputs[...,:1])
         deprocessed_input_palettes = deprocess(create_palette_image_from_input(examples.inputs))
 
 

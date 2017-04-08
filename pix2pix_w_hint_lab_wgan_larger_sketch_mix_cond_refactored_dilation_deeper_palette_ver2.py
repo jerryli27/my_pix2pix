@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
+TODO: this version mainly differs from the last one in that the palette is appended in the middle, but not as
+part of the input.
+
+
 This file implements the main framework for the Sketch Coloring program. It takes colored images side by side with
 their corresponding sketches and trains to convert one to the other. It is a tensorflow implementation of the
 PaintsChainer project (https://paintschainer.preferred.tech/) with modifications in some details.
@@ -41,7 +45,7 @@ import math
 import time
 import urllib
 
-from general_util import imread, get_all_image_paths
+from general_util import imread, read_palette
 from neural_util import decode_image, decode_image_with_file_name
 from sketches_util import sketch_extractor
 
@@ -80,7 +84,7 @@ parser.add_argument("--progress_freq", type=int, default=50, help="display progr
 # LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/extras/CUPTI/lib64
 parser.add_argument("--trace_freq", type=int, default=0, help="trace execution every trace_freq steps")
 parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
-parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
+parser.add_argument("--save_freq", type=int, default=2500, help="save model every save_freq steps, 0 to disable")
 
 parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
 parser.add_argument("--lab_colorization", action="store_true",
@@ -127,8 +131,6 @@ parser.add_argument("--mix_prob", type=float, default=0.5,
 a = parser.parse_args()
 # assert a.mix_prob >= 1
 
-# if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
-#     parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
 if a.gen_sketch_input and not a.use_sketch_loss:
     parser.error("If you want to use gen_sketch_input, please also turn on sketch loss.")
 if a.gen_sketch_input and a.mix_prob > 0:
@@ -139,7 +141,7 @@ if a.mode != "test" and a.single_input and (a.mix_prob < 1 and not a.gen_sketch_
 if a.output_ab and not a.lab_colorization :
     parser.error("If you want the generator to output only a and b channels, please also add lab_colorization flag.")
 if a.sketch_weight != 10.0:
-    input("Are you sure you don't want sketch_weight to be 10.0?")
+    raw_input("Are you sure you don't want sketch_weight to be 10.0?")
 
 CROP_SIZE = a.crop_size  # 128 # 256
 # The discriminator weights will be capped at the CLIP_VALUE.
@@ -149,7 +151,7 @@ CLIP_VALUE = 0.04
 APPROXIMATE_NUMBER_OF_TOTAL_PARAMETERS = 19523936
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
 
-Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints, is_hint_off")
+Examples = collections.namedtuple("Examples", "paths, inputs, targets, palettes, count, steps_per_epoch, input_hints, is_hint_off")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
 
 
@@ -303,15 +305,63 @@ def lab_to_rgb(lab):
 
         return tf.reshape(srgb_pixels, tf.shape(lab))
 
+
+def append_palettes(inputs, palettes):
+    # Inputs dimension: [batch_size, height, width, num_features]
+    # Palettes dimension: [batch_size, 1, 1, num_palette_colors * 3]
+    # input_height = tf.shape(inputs).as_list()[1]
+    # input_width = tf.shape(inputs).as_list()[2]
+    # num_palette_batch_size = tf.shape(palettes).as_list()[0]
+    # num_palette_colors = tf.shape(palettes).as_list()[1]
+    input_height = inputs.get_shape().as_list()[1]
+    input_width = inputs.get_shape().as_list()[2]
+    num_palette_batch_size = palettes.get_shape().as_list()[0]
+    num_palette_color_channels = palettes.get_shape().as_list()[3]
+
+    # if a.lab_colorization:
+    #
+    #     palettes_flat = tf.reshape(palettes, [num_palette_colors * 3])
+    #     palettes_mult = tf.reshape(palettes_flat, (1, 1, num_palette_colors, 3))
+    #     palettes_mult = tf.transpose(palettes_mult, perm=(2, 0, 1, 3))
+    #
+    #     # Assume b image (the image on the right) is the colored image.
+    #     palette_lab = rgb_to_lab(palettes_mult)
+    #     palette_L_chan, palette_a_chan, palette_b_chan = tf.unstack(palette_lab, axis=3)
+    #
+    #     palette_L_chan = tf.expand_dims(palette_L_chan, axis=3) / 50 - 1  # black and white with input range [0, 100]
+    #     palette_ab_chan = tf.stack([palette_a_chan, palette_b_chan],
+    #                                axis=3) / 110  # color channels with input range ~[-110, 110], not exact
+    #     palette_lab_images = tf.concat(3, [palette_L_chan, palette_ab_chan])
+    #     # Now everything is under -1 to 1 scale.
+    #     palettes_mult = tf.transpose(palette_lab_images, perm=(1, 2, 0, 3))
+    #     palettes_mult = tf.reshape(palettes_mult, (num_palette_colors * 3,))
+    #     palettes_mult = tf.tile(palettes_mult, [input_height * input_width], name=None)
+    #     palettes_mult = tf.reshape(palettes_mult, (input_height, input_width, num_palette_colors * 3))
+    # else:
+    #     palettes_flat = tf.reshape(palettes, [num_palette_colors * 3])
+    #     palettes_mult = tf.tile(palettes_flat, [input_height * input_width], name=None)
+    #     palettes_mult = tf.reshape(palettes_mult, (input_height, input_width, num_palette_colors * 3)) * 2 - 1
+
+    # palettes_flat = tf.reshape(palettes, [num_palette_batch_size, num_palette_color_channels])
+    # palettes_mult = tf.tile(palettes_flat, [1, input_height * input_width], name=None)
+    # palettes_mult = tf.reshape(palettes_mult, [num_palette_batch_size, input_height, input_width, num_palette_color_channels])
+    palettes_mult = tf.tile(palettes, [1, input_height, input_width, 1], name=None)
+    return tf.concat(3, (inputs, palettes_mult), name='palette_concat')
+
 def load_examples(user_hint = None):
-    if not os.path.exists(a.input_dir):
+    if not os.path.isfile(a.input_dir):
         raise Exception("input_dir does not exist")
 
-    input_paths = get_all_image_paths(a.input_dir)
+    input_paths, input_palettes = read_palette(a.input_dir)
     decode = decode_image_with_file_name
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
+
+    input_palettes = np.array(input_palettes)
+    if len(input_palettes.shape) != 3 or input_palettes.shape[2] != 3 or input_palettes.shape[0] != len(input_paths):
+        raise Exception("input_palettes has the wrong shape: %s . It shoud be (NUM_IMAGES, NUM_COLORS, 3)"
+                        %(str(input_palettes.shape)))
 
     def get_name(path):
         name, _ = os.path.splitext(os.path.basename(path))
@@ -319,16 +369,45 @@ def load_examples(user_hint = None):
 
     # if the image names are numbers, sort by the value rather than asciibetically
     # having sorted inputs means that the outputs are sorted in test mode
-    if all(get_name(path).isdigit() for path in input_paths):
-        input_paths = sorted(input_paths, key=lambda path: int(get_name(path)))
-    else:
-        input_paths = sorted(input_paths)
+    # if all(get_name(path).isdigit() for path in input_paths):
+    #     input_paths = sorted(input_paths, key=lambda path: int(get_name(path)))
+    # else:
+    #     input_paths = sorted(input_paths)
 
     with tf.name_scope("load_images"):
-        path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
-        reader = tf.WholeFileReader()
-        paths, contents = reader.read(path_queue)
-        raw_input = decode(contents, paths, channels=3)
+        input_queue = tf.train.slice_input_producer([input_paths, input_palettes], shuffle=a.mode == "train")
+        path_queue = input_queue[0]
+        palette_queue = tf.cast(input_queue[1], tf.float32) / 255.0 # Range 0 to 1, shape [NUM_PALETTE, 3]
+        # Now transform the palette queue into 1x1 images
+
+        num_palette_colors = input_palettes.shape[1]
+        if a.lab_colorization:
+
+            palettes_flat = tf.reshape(palette_queue, [num_palette_colors * 3])
+            palettes_flat = tf.reshape(palettes_flat, (1, 1, num_palette_colors, 3))
+            palettes_flat = tf.transpose(palettes_flat, perm=(2, 0, 1, 3))
+
+            # Assume b image (the image on the right) is the colored image.
+            palette_lab = rgb_to_lab(palettes_flat)
+            palette_L_chan, palette_a_chan, palette_b_chan = tf.unstack(palette_lab, axis=3)
+
+            palette_L_chan = tf.expand_dims(palette_L_chan,
+                                            axis=3) / 50 - 1  # black and white with input range [0, 100]
+            palette_ab_chan = tf.stack([palette_a_chan, palette_b_chan],
+                                       axis=3) / 110  # color channels with input range ~[-110, 110], not exact
+            palette_lab_images = tf.concat(3, [palette_L_chan, palette_ab_chan])
+            # Now everything is under -1 to 1 scale.
+            palette_lab_images = tf.transpose(palette_lab_images, perm=(1, 2, 0, 3))
+            palette_queue = tf.reshape(palette_lab_images, (1, 1, num_palette_colors * 3))
+        else:
+            palette_queue = tf.reshape(palette_queue, (1, 1, num_palette_colors * 3))
+
+        # path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
+        # reader = tf.WholeFileReader()
+        # paths, contents = reader.read(path_queue)
+        # Can't use whole file reader, so use tf.read_file instead.
+        contents = tf.read_file(path_queue)
+        raw_input = decode(contents, path_queue, channels=3)
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -439,7 +518,7 @@ def load_examples(user_hint = None):
         target_images = transform(targets)
     with tf.name_scope("input_images"):
         input_images = transform(inputs)
-
+        # input_images = append_palettes(input_images, palette_queue)
         # Please check the note above about the difference between rescale first and generate sketch first.
         # This code is kept here in case you need to switch to rescaling before generate sketches.
         # random_mix_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32,
@@ -452,16 +531,18 @@ def load_examples(user_hint = None):
             input_images, input_hints, is_hint_off = append_hint(input_images, target_images, user_hint=user_hint)
 
 
+
     if a.use_hint:
-        paths, inputs, targets, input_hints, is_hint_off = tf.train.batch([paths, input_images, target_images, input_hints, is_hint_off], batch_size=a.batch_size)
+        paths, inputs, targets, palettes, input_hints, is_hint_off = tf.train.batch([path_queue, input_images, target_images, palette_queue, input_hints, is_hint_off], batch_size=a.batch_size)
     else:
-        paths, inputs, targets = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
+        paths, inputs, targets, palettes = tf.train.batch([path_queue, input_images, target_images, palette_queue], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
 
     return Examples(
         paths=paths,
         inputs=inputs,
         targets=targets,
+        palettes=palettes,
         count=len(input_paths),
         steps_per_epoch=steps_per_epoch,
         input_hints=input_hints if a.use_hint else None,
@@ -469,26 +550,26 @@ def load_examples(user_hint = None):
     )
 
 
-def create_model(inputs, targets, is_hint_off=None):
-    def create_generator(generator_inputs, generator_outputs_channels, trainable = True):
+def create_model(inputs, targets, palettes, is_hint_off=None):
+    def create_generator(generator_inputs, generator_outputs_channels, generator_palettes, trainable=True):
         layers = []
 
         # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
         with tf.variable_scope("encoder_1"):
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
             output = batchnorm(convolved, trainable=trainable)
-            rectified = tf.nn.relu(output)  #TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
+            rectified = tf.nn.relu(output)  # TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
             layers.append(rectified)
 
         layer_specs = [
-            a.ngf * 2, # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
-            a.ngf * 2, # encoder_3: [batch, h/2, w/2, ngf * 2] => [batch, h/2, w/2, ngf * 2]
-            a.ngf * 4, # encoder_4: [batch, h/2, w/2, ngf * 2] => [batch, h/4, w/4, ngf * 4]
-            a.ngf * 4, # encoder_5: [batch, h/4, w/4, ngf * 4] => [batch, h/4, w/4, ngf * 4]
-            a.ngf * 8, # encoder_6: [batch, h/4, w/4, ngf * 4] => [batch, h/8, w/8, ngf * 8]
-            a.ngf * 8, # encoder_7: [batch, h/8, w/8, ngf * 8] => [batch, h/8, w/8, ngf * 8]
-            a.ngf * 16, # encoder_8: [batch, h/8, w/8, ngf * 8] => [batch, h/16, w/16, ngf * 16]
-            a.ngf * 16, # encoder_9: [batch, h/16, w/16, ngf * 16] => [batch, h/16, w/16, ngf * 16]
+            a.ngf * 2,  # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 2,  # encoder_3: [batch, h/2, w/2, ngf * 2] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 4,  # encoder_4: [batch, h/2, w/2, ngf * 2] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 4,  # encoder_5: [batch, h/4, w/4, ngf * 4] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 8,  # encoder_6: [batch, h/4, w/4, ngf * 4] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 8,  # encoder_7: [batch, h/8, w/8, ngf * 8] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 16,  # encoder_8: [batch, h/8, w/8, ngf * 8] => [batch, h/16, w/16, ngf * 16]
+            a.ngf * 16,  # encoder_9: [batch, h/16, w/16, ngf * 16] => [batch, h/16, w/16, ngf * 16]
         ]
         for out_channels in layer_specs:
             with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
@@ -501,16 +582,16 @@ def create_model(inputs, targets, is_hint_off=None):
                 output = batchnorm(convolved, trainable=trainable)
                 rectified = tf.nn.relu(output)
                 layers.append(rectified)
-        
+
         layer_specs = [
-            (a.ngf * 16),   # decoder_8: [batch, h/16, w/16, ngf * 16 * 2]=> [batch, h/8, w/8, ngf * 16]
-            (a.ngf * 8),   # decoder_7: [batch, h/8, w/8, ngf * 16] => [batch, h/8, w/8, ngf * 8]
-            (a.ngf * 8),   # decoder_6: [batch, h/8, w/8, ngf * 8 * 2] => [batch, h/4, w/4, ngf * 8]
-            (a.ngf * 4),   # decoder_5: [batch, h/4, w/4, ngf * 8] => [batch, h/4, w/4, ngf * 4]
-            (a.ngf * 4),   # decoder_4: [batch, h/4, w/4, ngf * 4 * 2] => [batch, h/2, w/2, ngf * 4]
-            (a.ngf * 2),   # decoder_3: [batch, h/2, w/2, ngf * 4] => [batch, h/2, w/2, ngf * 2]
-            (a.ngf * 2),       # decoder_2: [batch, h/2, w/2, ngf * 2 * 2] => [batch, h, w, ngf * 2]
-            (a.ngf * 1),                 # decoder_1: [batch, h, w, ngf * 2] => [batch, h, w, ngf]
+            (a.ngf * 16),  # decoder_8: [batch, h/16, w/16, ngf * 16 * 2]=> [batch, h/8, w/8, ngf * 16]
+            (a.ngf * 8),  # decoder_7: [batch, h/8, w/8, ngf * 16] => [batch, h/8, w/8, ngf * 8]
+            (a.ngf * 8),  # decoder_6: [batch, h/8, w/8, ngf * 8 * 2] => [batch, h/4, w/4, ngf * 8]
+            (a.ngf * 4),  # decoder_5: [batch, h/4, w/4, ngf * 8] => [batch, h/4, w/4, ngf * 4]
+            (a.ngf * 4),  # decoder_4: [batch, h/4, w/4, ngf * 4 * 2] => [batch, h/2, w/2, ngf * 4]
+            (a.ngf * 2),  # decoder_3: [batch, h/2, w/2, ngf * 4] => [batch, h/2, w/2, ngf * 2]
+            (a.ngf * 2),  # decoder_2: [batch, h/2, w/2, ngf * 2 * 2] => [batch, h, w, ngf * 2]
+            (a.ngf * 1),  # decoder_1: [batch, h, w, ngf * 2] => [batch, h, w, ngf]
         ]
         num_encoder_layers = len(layers)
         for decoder_layer, (out_channels) in enumerate(layer_specs):
@@ -524,7 +605,10 @@ def create_model(inputs, targets, is_hint_off=None):
                     output = deconv(input, out_channels, 1, 3, trainable=trainable)
                 else:
                     if decoder_layer == 0:
-                        input = tf.concat(3, [layers[-1], layers[-2]])
+
+                        input = append_palettes(layers[-1], generator_palettes)
+
+                        # input = tf.concat(3, [layers[-1], layers[-2]])
                     else:
                         input = tf.concat(3, [layers[-1], layers[skip_layer]])
                     # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
@@ -535,7 +619,7 @@ def create_model(inputs, targets, is_hint_off=None):
 
         # decoder_1: [batch, h/2, w/2, ngf * 2] => [batch, h, w, generator_outputs_channels]
         with tf.variable_scope("decoder_1"):
-            input = tf.concat(3,[layers[-1], layers[0]])
+            input = tf.concat(3, [layers[-1], layers[0]])
             output = deconv(input, generator_outputs_channels, 1, 3, trainable=trainable)
             layers.append(output)
 
@@ -598,7 +682,7 @@ def create_model(inputs, targets, is_hint_off=None):
         out_channels = int(targets.get_shape()[-1])
         if a.output_ab:
             assert out_channels == 3
-            ab_outputs = create_generator(inputs, 2)
+            ab_outputs = create_generator(inputs, 2, palettes)
             # Concatenate the l layer in the input with the ab output by the generator.
             outputs = tf.concat(3, (inputs[..., :1], ab_outputs))
             print(outputs.get_shape().as_list())
@@ -607,9 +691,9 @@ def create_model(inputs, targets, is_hint_off=None):
             if a.gen_sketch_input:
                 assert a.use_sketch_loss
                 # Always use the sketch generated as the input if the gen_sketch_input is on.
-                outputs = create_generator(real_sketches, out_channels)
+                outputs = create_generator(real_sketches, out_channels, palettes)
             else:
-                outputs = create_generator(inputs,out_channels)
+                outputs = create_generator(inputs,out_channels, palettes)
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
@@ -626,7 +710,8 @@ def create_model(inputs, targets, is_hint_off=None):
                 # Creating discriminator without feeding in the hint information as part of the input. This makes the
                 # learning process a little bit easier for the discriminator.
                 print(inputs[...,:1].get_shape().as_list())
-                predict_real = create_discriminator(inputs[...,:1], targets)
+                # The last 4 are hints
+                predict_real = create_discriminator(inputs[...,:-4], targets)
             else:
                 predict_real = create_discriminator(inputs, targets)
 
@@ -634,7 +719,7 @@ def create_model(inputs, targets, is_hint_off=None):
         with tf.variable_scope("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator", reuse=True):
             if a.use_hint:
                 print(inputs[...,:1].get_shape().as_list())
-                predict_fake = create_discriminator(inputs[...,:1], outputs)
+                predict_fake = create_discriminator(inputs[...,:-4], outputs)
             else:
                 predict_fake = create_discriminator(inputs, outputs)
 
@@ -728,7 +813,7 @@ def save_images(fetches, image_dir, step=None):
         fileset = {"name": name, "step": step}
         kinds = ["outputs", ]
         if not (a.single_input and a.mode == "test"):
-            kinds = kinds + ["inputs", "targets"]
+            kinds = kinds + ["inputs", "input_palettes", "targets"]
             if a.use_hint:
                 kinds.append("hints")
             if a.use_sketch_loss:
@@ -762,14 +847,14 @@ def append_index(filesets, step=False):
         if not (a.single_input and a.mode == "test"):
             if a.use_hint:
                 if a.use_sketch_loss:
-                    index.write("<th>name</th><th>input</th><th>hint</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th></tr>")
+                    index.write("<th>name</th><th>input</th><th>input_palette</th><th>hint</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th></tr>")
                 else:
-                    index.write("<th>name</th><th>input</th><th>hint</th><th>output</th><th>target</th></tr>")
+                    index.write("<th>name</th><th>input</th><th>input_palette</th><th>hint</th><th>output</th><th>target</th></tr>")
             else:
                 if a.use_sketch_loss:
-                    index.write("<th>name</th><th>input</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th></tr>")
+                    index.write("<th>name</th><th>input</th><th>input_palette</th><th>output</th><th>target</th><th>real_sketch</th><th>fake_sketch</th></tr>")
                 else:
-                    index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>")
+                    index.write("<th>name</th><th>input</th><th>input_palette</th><th>output</th><th>target</th></tr>")
         else:
             index.write("<th>name</th><th>output</th></tr>")
 
@@ -780,7 +865,7 @@ def append_index(filesets, step=False):
         index.write("<td>%s</td>" % fileset["name"])
         kinds = ["outputs", ]
         if not (a.single_input and a.mode == "test"):
-            kinds = ["inputs", "hints", "outputs", "targets"] if a.use_hint else ["inputs", "outputs", "targets"]
+            kinds = ["inputs", "input_palettes", "hints", "outputs", "targets"] if a.use_hint else ["inputs", "input_palettes", "outputs", "targets"]
             if a.use_sketch_loss:
                 kinds = kinds + ["real_sketches", "fake_sketches"]
         for kind in kinds:
@@ -818,8 +903,8 @@ def main():
         a.scale_size = CROP_SIZE
         a.flip = False
         if not (a.mix_prob == 1.0 or a.mix_prob <= 0):
-            input("Are you sure you don't want to set the mix_prob to 1 (always using the simple sketch generator) or "
-                  "0 (always use the input image)?")
+            raw_input("Are you sure you don't want to set the mix_prob to 1 (always using the simple sketch generator) "
+                  "or 0 (always use the input image)?")
         if a.user_hint_path is not None:
             a.hint_prob = 1.0
             if a.user_hint_path == "BLANK":
@@ -844,7 +929,7 @@ def main():
 
     print("examples count = %d" % examples.count)
 
-    model = create_model(examples.inputs, examples.targets, examples.is_hint_off)
+    model = create_model(examples.inputs, examples.targets, examples.palettes, examples.is_hint_off)
 
     def deprocess(image):
         if a.aspect_ratio != 1.0:
@@ -897,13 +982,32 @@ def main():
                 image_rgba = (image + 1) / 2
                 return tf.image.convert_image_dtype(image_rgba, dtype=tf.uint8, saturate=True)
 
+    def create_palette_image_from_palettes(inputs):
+        input_last_dim = inputs.get_shape().as_list()[-1]
+        num_palette_colors_in_input = int(input_last_dim / 3) # No sketch no hint.
+        palette_colors = []
+        _per_palette_hw = 16
+        for i_color in range(num_palette_colors_in_input):
+            current_palette_1x1_image = inputs[...,i_color*3:(1+i_color)*3]
+            palette_colors.append(tf.tile(current_palette_1x1_image, [1,_per_palette_hw,_per_palette_hw,1], name=None))
+        palette_colors = tf.concat(2, (palette_colors)) # So now the palette_colors has shape [batch_size, 4, 4 * num_palette_colors, 3]
+        shape = palette_colors.get_shape().as_list()
+        assert shape[1] == _per_palette_hw and shape[2] == _per_palette_hw * num_palette_colors_in_input and shape[3] == 3
+        return palette_colors
+
+
+
+
     # reverse any processing on images so they can be written to disk or displayed to user
     with tf.name_scope("deprocess_inputs"):
+
         if a.use_hint:
             deprocessed_inputs = deprocess(examples.inputs[...,:1])
-            deprocessed_hints = deprocess(examples.inputs[...,1:])
+            # Separate all the palette colors.
+            deprocessed_hints = deprocess(examples.inputs[...,-4:])
         else:
-            deprocessed_inputs = deprocess(examples.inputs)
+            deprocessed_inputs = deprocess(examples.inputs[...,:1])
+        deprocessed_input_palettes = deprocess(create_palette_image_from_palettes(examples.palettes))
 
 
     with tf.name_scope("deprocess_targets"):
@@ -925,6 +1029,7 @@ def main():
                     "paths": examples.paths,
                     "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                     "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
+                    "input_palettes": tf.map_fn(tf.image.encode_png, deprocessed_input_palettes, dtype=tf.string, name="palettes_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
                     "real_sketches": tf.map_fn(tf.image.encode_png, deprocessed_real_sketches, dtype=tf.string, name="real_sketches_pngs"),
@@ -935,6 +1040,7 @@ def main():
                     "paths": examples.paths,
                     "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
                     "hints": tf.map_fn(tf.image.encode_png, deprocessed_hints, dtype=tf.string, name="hint_pngs"),
+                    "input_palettes": tf.map_fn(tf.image.encode_png, deprocessed_input_palettes, dtype=tf.string, name="palettes_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
                 }
@@ -943,6 +1049,7 @@ def main():
                 display_fetches = {
                     "paths": examples.paths,
                     "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
+                    "input_palettes": tf.map_fn(tf.image.encode_png, deprocessed_input_palettes, dtype=tf.string, name="palettes_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
                     "real_sketches": tf.map_fn(tf.image.encode_png, deprocessed_real_sketches, dtype=tf.string, name="real_sketches_pngs"),
@@ -952,6 +1059,7 @@ def main():
                 display_fetches = {
                     "paths": examples.paths,
                     "inputs": tf.map_fn(tf.image.encode_png, deprocessed_inputs, dtype=tf.string, name="input_pngs"),
+                    "input_palettes": tf.map_fn(tf.image.encode_png, deprocessed_input_palettes, dtype=tf.string, name="palettes_pngs"),
                     "targets": tf.map_fn(tf.image.encode_png, deprocessed_targets, dtype=tf.string, name="target_pngs"),
                     "outputs": tf.map_fn(tf.image.encode_png, deprocessed_outputs, dtype=tf.string, name="output_pngs"),
                 }
@@ -960,6 +1068,8 @@ def main():
     # summaries
     with tf.name_scope("inputs_summary"):
         tf.summary.image("inputs", deprocessed_inputs)
+    with tf.name_scope("input_palettes_summary"):
+        tf.summary.image("input_palettes", deprocessed_input_palettes)
     if a.use_hint:
         with tf.name_scope("hints_summary"):
             tf.summary.image("inputs", deprocessed_hints)

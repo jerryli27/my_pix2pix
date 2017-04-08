@@ -724,13 +724,13 @@ def create_model(inputs, targets, is_hint_off=None):
         else:
             gen_loss_GAN = -tf.reduce_mean(predict_fake)
 
-
-        # Uses a random variable to make sure discriminator trains more than generator.
-        random_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32, name="random_gen_no_train_condition")
-        gen_train_prob_constant = tf.constant(a.gen_train_prob)
-        is_gen_loss_on = tf.greater_equal(random_condition, gen_train_prob_constant, name="is_gen_loss_on")
         gen_loss_GAN_no_prob = gen_loss_GAN
-        gen_loss_GAN = tf.cond(is_gen_loss_on, lambda: gen_loss_GAN, lambda: tf.constant(0,dtype=tf.float32))
+        # # Uses a random variable to make sure discriminator trains more than generator.
+        # random_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32, name="random_gen_no_train_condition")
+        # gen_train_prob_constant = tf.constant(a.gen_train_prob)
+        # is_gen_loss_on = tf.less(random_condition, gen_train_prob_constant, name="is_gen_loss_on")
+        # gen_loss_GAN_no_prob = gen_loss_GAN
+        # gen_loss_GAN = tf.cond(is_gen_loss_on, lambda: gen_loss_GAN, lambda: tf.constant(0,dtype=tf.float32))
 
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         if a.use_sketch_loss:
@@ -760,12 +760,12 @@ def create_model(inputs, targets, is_hint_off=None):
 
             # TODO: this one works better but is not compatible with checkpoints from previous versions.
             # Uses a random variable to make sure discriminator trains more than generator.
-            # random_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32, name="random_gen_no_train_condition")
-            # gen_train_prob_constant = tf.constant(a.gen_train_prob)
-            # is_gen_loss_on = tf.greater_equal(random_condition, gen_train_prob_constant, name="is_gen_loss_on")
-            # gen_train = tf.cond(is_gen_loss_on, lambda: gen_optim.minimize(gen_loss, var_list=gen_tvars), lambda: tf.no_op())
+            random_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32, name="random_gen_no_train_condition")
+            gen_train_prob_constant = tf.constant(a.gen_train_prob)
+            is_gen_loss_on = tf.less(random_condition, gen_train_prob_constant, name="is_gen_loss_on")
+            gen_train = tf.cond(is_gen_loss_on, lambda: gen_optim.minimize(gen_loss, var_list=gen_tvars), lambda: tf.no_op())
 
-            gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+            # gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     if a.use_sketch_loss:

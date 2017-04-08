@@ -113,6 +113,16 @@ def main():
 
         output_image_path_list = a.output_dir if a.output_list_only else os.path.join(a.output_dir, "image_path_list.txt")
         output_image_path_list_file = open(output_image_path_list, "w")
+        if not a.allow_bw:
+            passed_bw_image_path_list = a.output_dir if a.output_list_only else os.path.join(a.output_dir, "passed_bw_image_path_list.txt")
+            passed_bw_image_path_list_file = open(passed_bw_image_path_list, "w")
+            failed_bw_image_path_list = a.output_dir if a.output_list_only else os.path.join(a.output_dir, "failed_bw_image_path_list.txt")
+            failed_bw_image_path_list_file = open(failed_bw_image_path_list, "w")
+        if not a.no_face_detection:
+            passed_face_image_path_list = a.output_dir if a.output_list_only else os.path.join(a.output_dir, "passed_face_image_path_list.txt")
+            passed_face_image_path_list_file = open(passed_face_image_path_list, "w")
+            failed_face_image_path_list = a.output_dir if a.output_list_only else os.path.join(a.output_dir, "failed_face_image_path_list.txt")
+            failed_face_image_path_list_file = open(failed_face_image_path_list, "w")
 
         reader = tf.WholeFileReader()
         filename_queue = tf.train.string_input_producer(all_image_paths, shuffle=False)
@@ -171,27 +181,51 @@ def main():
                 assert results["paths"] == src_path
                 if results["hw_ratio_test_result"]:
                     num_image_passing_hw_ratio += 1
+
+                    if not a.output_list_only:
+                        save(results["dst_encoded"], dst_path)
+                        if a.gen_sketch:
+                            save(results["dst_sketch_encoded"], dst_sketch_path)
+                            save(results["combined_image_encoded"], dst_combined_path)
+                        src_txt_path = src_path+"txt"
+                        if os.path.isfile(src_txt_path):
+                            copy(src_txt_path, dst_path+".txt")
+
                     if results["bw_test_result"]:
                         num_image_passing_bw += 1
+
+                        if not a.allow_bw:
+                            passed_bw_image_path_list_file.write(results["paths"] + "\n")
+
                         # a wierd bug: int(min(a.size / 8, 32)) works but min(a.size / 8, 32) does not.
                         # min(a.size / 8, 32) gives "Required argument 'rejectLevels' (pos 2) not found"
                         if a.no_face_detection or detect_face(results["dst"], cascade_classifier, face_min_size=int(min(a.size / 8, 16))):
                             num_image_passing_face += 1
                             output_image_path_list_file.write(results["paths"] + "\n")
-                            if not a.output_list_only:
-                                save(results["dst_encoded"], dst_path)
-                                if a.gen_sketch:
-                                    save(results["dst_sketch_encoded"], dst_sketch_path)
-                                    save(results["combined_image_encoded"], dst_combined_path)
-                                src_txt_path = src_path+"txt"
-                                if os.path.isfile(src_txt_path):
-                                    copy(src_txt_path, dst_path+".txt")
+                            if not a.no_face_detection:
+                                passed_face_image_path_list_file.write(results["paths"] + "\n")
+                        else:
+                            if not a.no_face_detection:
+                                failed_face_image_path_list_file.write(results["paths"] + "\n")
+                    else:
+                        if not a.allow_bw:
+                            failed_bw_image_path_list_file.write(results["paths"] + "\n")
+
+
+
+
             except Exception as exception:
                 exc_type, exc_value, exc_traceback = sys.exc_info()
                 traceback.print_exception(exc_type, exc_value, exc_traceback)
                 print("exception ", exception, " happened when processing ", src_path, ". Skipping this one. ")
         print("Number of images preprocessed in total: %d. In which %d passed hw ratio check, %d passed black-and-white test and %d passed face test and was saved." %(image_i +1, num_image_passing_hw_ratio, num_image_passing_bw ,num_image_passing_face))
         output_image_path_list_file.close()
+        if not a.allow_bw:
+            passed_bw_image_path_list_file.close()
+            failed_bw_image_path_list_file.close()
+        if not a.no_face_detection:
+            passed_face_image_path_list_file.close()
+            failed_face_image_path_list_file.close()
         coord.request_stop()
         coord.join(threads)
         sess.close()

@@ -127,8 +127,8 @@ parser.add_argument("--mix_prob", type=float, default=0.5,
 a = parser.parse_args()
 # assert a.mix_prob >= 1
 
-if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
-    parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
+# if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
+#     parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
 if a.gen_sketch_input and not a.use_sketch_loss:
     parser.error("If you want to use gen_sketch_input, please also turn on sketch loss.")
 if a.gen_sketch_input and a.mix_prob > 0:

@@ -40,6 +40,7 @@ import collections
 import math
 import time
 import urllib
+import tensorflow.contrib.slim as slim
 
 from general_util import imread, get_all_image_paths
 from neural_util import decode_image, decode_image_with_file_name
@@ -125,10 +126,9 @@ parser.add_argument("--mix_prob", type=float, default=0.5,
                          "provided input sketches.")
 
 a = parser.parse_args()
-# assert a.mix_prob >= 1
 
-# if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
-#     parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
+if a.use_sketch_loss and a.pretrained_sketch_net_path is None:
+    parser.error("If you want to use sketch loss, please provide a valid pretrained_sketch_net_path.")
 if a.gen_sketch_input and not a.use_sketch_loss:
     parser.error("If you want to use gen_sketch_input, please also turn on sketch loss.")
 if a.gen_sketch_input and a.mix_prob > 0:
@@ -139,7 +139,7 @@ if a.mode != "test" and a.single_input and (a.mix_prob < 1 and not a.gen_sketch_
 if a.output_ab and not a.lab_colorization :
     parser.error("If you want the generator to output only a and b channels, please also add lab_colorization flag.")
 if a.sketch_weight != 10.0:
-    input("Are you sure you don't want sketch_weight to be 10.0?")
+    raw_input("Are you sure you don't want sketch_weight to be 10.0?")
 
 CROP_SIZE = a.crop_size  # 128 # 256
 # The discriminator weights will be capped at the CLIP_VALUE.
@@ -180,7 +180,24 @@ def lrelu(x, a):
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
 
 
+def slim_batch_norm(input, trainable=True):
+    with tf.variable_scope("batchnorm", reuse=None):
+        # TODO: Changing the decay from 0.95 to 0.999, also changing updates_collections from default to None. I don't know if I should change the reuse because my code is different (eval and train not in the same run), but I did.
+        # normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, updates_collections=None, trainable=trainable, is_training= tf.constant(True, dtype=tf.bool)) # True) #a.mode == "train"
+        # return normalized
+        if a.mode == "train":
+            normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, trainable=trainable, updates_collections=None,
+                                         is_training=True)  # I have to use is_training=true all the time, even during test phase, otherwise the output of test set is wierd. I don't update the moving average in test phase anyway.
+        else:
+            # Take away updates_collections makes it update the moving average outside eval step. This can make sure
+            # the output is deterministic and the moving average does not change during testing.
+            # I have to keep is_training to be true, otherwise the output looks wierd.
+            normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, trainable=trainable,
+                                         is_training=True)
+        return normalized
+
 def batchnorm(input, trainable=True):
+    # This one is buggy because it does not precompute the statistics for test time.
     with tf.variable_scope("batchnorm"):
         # this block looks like it has 3 inputs on the graph unless we do this
         input = tf.identity(input)
@@ -476,7 +493,7 @@ def create_model(inputs, targets, is_hint_off=None):
         # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
         with tf.variable_scope("encoder_1"):
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            output = batchnorm(convolved, trainable=trainable)
+            output = slim_batch_norm(convolved, trainable=trainable)
             rectified = tf.nn.relu(output)  #TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
             layers.append(rectified)
 
@@ -498,7 +515,7 @@ def create_model(inputs, targets, is_hint_off=None):
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
+                output = slim_batch_norm(convolved, trainable=trainable)
                 rectified = tf.nn.relu(output)
                 layers.append(rectified)
         
@@ -529,7 +546,7 @@ def create_model(inputs, targets, is_hint_off=None):
                         input = tf.concat(3, [layers[-1], layers[skip_layer]])
                     # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
                     output = deconv(input, out_channels, 2, 4, trainable=trainable)
-                output = batchnorm(output, trainable=trainable)
+                output = slim_batch_norm(output, trainable=trainable)
                 output = tf.nn.relu(output)
                 layers.append(output)
 
@@ -550,7 +567,7 @@ def create_model(inputs, targets, is_hint_off=None):
         # layer_1: [batch, h, w, in_channels * 2] => [batch, h/2, w/2, ndf]
         with tf.variable_scope("layer_1"):
             convolved = conv(input, a.ndf, stride=2, shift=4)
-            normed = batchnorm(convolved)
+            normed = slim_batch_norm(convolved)
             rectified = lrelu(normed, 0.2)
             layers.append(rectified)
 
@@ -574,7 +591,7 @@ def create_model(inputs, targets, is_hint_off=None):
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=2, shift=4)
 
-                normed = batchnorm(convolved)
+                normed = slim_batch_norm(convolved)
                 rectified = tf.nn.relu(normed)
                 layers.append(rectified)
 
@@ -586,13 +603,84 @@ def create_model(inputs, targets, is_hint_off=None):
 
         return layers[-1]
 
+    def create_sketch_generator(generator_inputs, generator_outputs_channels, trainable=True):
+        layers = []
+
+        # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
+        with tf.variable_scope("encoder_1"):
+            convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
+            output = batchnorm(convolved, trainable=trainable)
+            rectified = tf.nn.relu(output)  # TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
+            layers.append(rectified)
+
+        layer_specs = [
+            a.ngf * 2,  # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 2,  # encoder_3: [batch, h/2, w/2, ngf * 2] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 4,  # encoder_4: [batch, h/2, w/2, ngf * 2] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 4,  # encoder_5: [batch, h/4, w/4, ngf * 4] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 8,  # encoder_6: [batch, h/4, w/4, ngf * 4] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 8,  # encoder_7: [batch, h/8, w/8, ngf * 8] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 16,  # encoder_8: [batch, h/8, w/8, ngf * 8] => [batch, h/16, w/16, ngf * 16]
+            a.ngf * 16,  # encoder_9: [batch, h/16, w/16, ngf * 16] => [batch, h/16, w/16, ngf * 16]
+        ]
+        for out_channels in layer_specs:
+            with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+                if (len(layers) + 1) % 2 == 0:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    convolved = conv(layers[-1], out_channels, stride=2, shift=4, trainable=trainable)
+                else:
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
+                output = batchnorm(convolved, trainable=trainable)
+                rectified = tf.nn.relu(output)
+                layers.append(rectified)
+
+        layer_specs = [
+            (a.ngf * 16),  # decoder_8: [batch, h/16, w/16, ngf * 16 * 2]=> [batch, h/8, w/8, ngf * 16]
+            (a.ngf * 8),  # decoder_7: [batch, h/8, w/8, ngf * 16] => [batch, h/8, w/8, ngf * 8]
+            (a.ngf * 8),  # decoder_6: [batch, h/8, w/8, ngf * 8 * 2] => [batch, h/4, w/4, ngf * 8]
+            (a.ngf * 4),  # decoder_5: [batch, h/4, w/4, ngf * 8] => [batch, h/4, w/4, ngf * 4]
+            (a.ngf * 4),  # decoder_4: [batch, h/4, w/4, ngf * 4 * 2] => [batch, h/2, w/2, ngf * 4]
+            (a.ngf * 2),  # decoder_3: [batch, h/2, w/2, ngf * 4] => [batch, h/2, w/2, ngf * 2]
+            (a.ngf * 2),  # decoder_2: [batch, h/2, w/2, ngf * 2 * 2] => [batch, h, w, ngf * 2]
+            (a.ngf * 1),  # decoder_1: [batch, h, w, ngf * 2] => [batch, h, w, ngf]
+        ]
+        num_encoder_layers = len(layers)
+        for decoder_layer, (out_channels) in enumerate(layer_specs):
+            skip_layer = num_encoder_layers - decoder_layer - 1
+            with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
+                if decoder_layer % 2 != 0:
+                    # first decoder layer doesn't have skip connections
+                    # since it is directly connected to the skip_layer
+                    input = layers[-1]
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
+                    output = deconv(input, out_channels, 1, 3, trainable=trainable)
+                else:
+                    if decoder_layer == 0:
+                        input = tf.concat(3, [layers[-1], layers[-2]])
+                    else:
+                        input = tf.concat(3, [layers[-1], layers[skip_layer]])
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+                    output = deconv(input, out_channels, 2, 4, trainable=trainable)
+                output = batchnorm(output, trainable=trainable)
+                output = tf.nn.relu(output)
+                layers.append(output)
+
+        # decoder_1: [batch, h/2, w/2, ngf * 2] => [batch, h, w, generator_outputs_channels]
+        with tf.variable_scope("decoder_1"):
+            input = tf.concat(3, [layers[-1], layers[0]])
+            output = deconv(input, generator_outputs_channels, 1, 3, trainable=trainable)
+            layers.append(output)
+
+        return layers[-1]
+
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
-            # real_sketches = create_generator(targets, 1, trainable=False)
+            real_sketches = create_sketch_generator(targets, 1, trainable=False)
             # The commented out piece of code is for using the dilation sketch generation instead of the pretrained
             # sketch generator. TWhen the input image does not contain information about the background, the pretrained
             # sketch generator works better because it ignores the background when generating sketches.
-            real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
+            # real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
 
     with tf.variable_scope("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
         out_channels = int(targets.get_shape()[-1])
@@ -613,9 +701,9 @@ def create_model(inputs, targets, is_hint_off=None):
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
-            # fake_sketches = create_generator(outputs, 1, trainable=False)
+            fake_sketches = create_sketch_generator(outputs, 1, trainable=False)
             # Same as the real_sketches line above.
-            fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
+            # fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
 
 
     # Create two copies of the discriminator: one for real pairs and one for fake pairs.
@@ -682,11 +770,18 @@ def create_model(inputs, targets, is_hint_off=None):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator")]
         # discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
         # WGAN does not use momentum based optimizer
-        discrim_optim = tf.train.RMSPropOptimizer(a.lr)
+        # discrim_optim = tf.train.RMSPropOptimizer(a.lr)
         # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
 
+
+
         # WGAN adds a clip and train discriminator 5 times
-        discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # Note: the slim batch norm (and other batch norms) requires updating the moving average of mean and variances
+        # in the batch norm layers. So I cannot use the naive optimizer without updating them.
+        discrim_min = slim.learning.create_train_op(discrim_loss, tf.train.RMSPropOptimizer(a.lr),
+                                                    variables_to_train=discrim_tvars)
+
         discrim_clips = [var.assign(tf.clip_by_value(var, -CLIP_VALUE, CLIP_VALUE)) for var in discrim_tvars]
         with tf.control_dependencies([discrim_min]):
             discrim_train = tf.group(*discrim_clips)
@@ -695,8 +790,19 @@ def create_model(inputs, targets, is_hint_off=None):
         with tf.control_dependencies([discrim_train]):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")]
             # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-            gen_optim = tf.train.RMSPropOptimizer(a.lr)
-            gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+            # gen_optim = tf.train.RMSPropOptimizer(a.lr)
+            # gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+
+            # Same as above, can't use naive optimizer without updates op.
+            gen_train = slim.learning.create_train_op(gen_loss, tf.train.RMSPropOptimizer(a.lr),
+                                                      variables_to_train=gen_tvars)
+
+            # update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, "generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")
+            # if update_ops:
+            #     updates = tf.group(*update_ops)
+            #     with tf.control_dependencies([updates]):
+            #         gen_train = tf.identity(gen_train)
+            #     print("Update_ops: %s" %(str(update_ops)))
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     if a.use_sketch_loss:
@@ -1015,40 +1121,42 @@ def main():
         with tf.Session(config=config) as sess:
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+            if checkpoint is None:
+                raise IOError("Check point %s does not exist!" %(a.checkpoint))
             saver.restore(sess, checkpoint)
             sess.run(tf.initialize_variables(other_var))
             saver = tf.train.Saver(max_to_keep=1)
             saver.save(sess,checkpoint)
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        # if a.use_sketch_loss and a.mode != "test": # and a.checkpoint is None:
-        #     sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-        #     # This is a sanity check to make sure sketch variables are not trainable.
-        #     assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-        #                                    scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
-        #     other_var = [var for var in tf.global_variables() if
-        #                  (var not in sketch_var)]
-        #     print("number of sketch var = %d, number of other var = %d"
-        #           % (len(sketch_var), len(other_var)))
-        #     assert len(sketch_var) != 0
-        #     saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
-        #     with tf.Session(config=config) as sess:
-        #         print("loading sketch generator model from checkpoint")
-        #         pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
-        #         saver.restore(sess, pretrained_sketch_checkpoint)
-        #         sess.run(tf.initialize_variables(other_var))
-        #         sketch_var_value_before = sketch_var[0].eval()[0, 0, 0, 0]
-        #         print("Sketch var value before supervised session: %f" %(sketch_var_value_before))
-        #         saver = tf.train.Saver(max_to_keep=1)
-        #         saver.save(sess,save_path=os.path.join(a.output_dir, "model"))
-        # else:
-        #     saver = tf.train.Saver(max_to_keep=1)
+        if a.use_sketch_loss and a.mode != "test": # and a.checkpoint is None:
+            sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+            # This is a sanity check to make sure sketch variables are not trainable.
+            assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                           scope=SKETCH_VAR_SCOPE_PREFIX + "generator")) == 0
+            other_var = [var for var in tf.global_variables() if
+                         (var not in sketch_var)]
+            print("number of sketch var = %d, number of other var = %d"
+                  % (len(sketch_var), len(other_var)))
+            assert len(sketch_var) != 0
+            saver = tf.train.Saver(max_to_keep=1, var_list=sketch_var)
+            with tf.Session(config=config) as sess:
+                print("loading sketch generator model from checkpoint")
+                pretrained_sketch_checkpoint = tf.train.latest_checkpoint(a.pretrained_sketch_net_path)
+                saver.restore(sess, pretrained_sketch_checkpoint)
+                sess.run(tf.initialize_variables(other_var))
+                sketch_var_value_before = sketch_var[0].eval()[0, 0, 0, 0]
+                print("Sketch var value before supervised session: %f" %(sketch_var_value_before))
+                saver = tf.train.Saver(max_to_keep=1)
+                saver.save(sess,save_path=os.path.join(a.output_dir, "model"))
+        else:
+            saver = tf.train.Saver(max_to_keep=1)
         # The code commented out is for when one wants to switch from the pretrained sketch generator for sketch loss
         # to the dilation sketch generator.
-        sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
-        if not a.train_sketch:
-            assert len(sketch_var) == 0
-        saver = tf.train.Saver(max_to_keep=1)
+        # sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
+        # if not a.train_sketch:
+        #     assert len(sketch_var) == 0
+        # saver = tf.train.Saver(max_to_keep=1)
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
@@ -1059,20 +1167,28 @@ def main():
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
             saver.restore(sess, checkpoint)
-        # elif a.use_sketch_loss:
-        #     print("loading model with saved sketch generator variables.")
-        #     checkpoint = tf.train.latest_checkpoint(a.output_dir)
-        #     print(checkpoint)
-        #     assert checkpoint is not None
-        #     saver.restore(sess, checkpoint)
-        #
-        #     # sketch_var_value_after = sketch_var[0].eval(session=sess)[0, 0, 0, 0]
-        #     # print("Sketch var value after supervised session: %f" %(sketch_var_value_after))
-        #     # assert sketch_var_value_after == sketch_var_value_before
+        elif a.use_sketch_loss:
+            print("loading model with saved sketch generator variables.")
+            checkpoint = tf.train.latest_checkpoint(a.output_dir)
+            print(checkpoint)
+            assert checkpoint is not None
+            saver.restore(sess, checkpoint)
+
+            sketch_var_value_after = sketch_var[0].eval(session=sess)[0, 0, 0, 0]
+            print("Sketch var value after supervised session: %f" %(sketch_var_value_after))
+            assert sketch_var_value_after == sketch_var_value_before
 
 
 
         if a.mode == "test":
+            # DEBUG: try to print moving average
+            moving_avg_vars = [var for var in tf.global_variables() if
+                               ("moving_mean" in var.name or "moving_variance" in var.name)]
+            moving_avg_vars_before = sess.run(moving_avg_vars)
+            print("moving_avg_vars_before : %s" %(str(moving_avg_vars_before[0])))
+
+
+
             # Testing, run a single epoch over all input data
             for step in range(examples.steps_per_epoch):
                 results = sess.run(display_fetches)
@@ -1085,6 +1201,9 @@ def main():
                         print("Evaluated %d out of %d steps." %(step,examples.steps_per_epoch))
                 index_path = append_index(filesets)
             print("wrote index at", index_path)
+
+            moving_avg_vars_after = sess.run(moving_avg_vars)
+            print("moving_avg_vars_after : %s" %(str(moving_avg_vars_after[0])))
         else:
             # Training
             max_steps = 2**32

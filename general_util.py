@@ -392,13 +392,13 @@ def argsort(seq):
     return sorted(range(len(seq)), key=seq.__getitem__)
 
 def read_palette(directory, do_sort=True):
-    # type: (str) -> List[str], List[Tuple[int,int,int]
+    # type: (str) -> List[str], List[Tuple[int,int,int]]
     """
 
     :param directory: a file containing paths to images as well as the palette the images used.
     :return: A sorted list of paths to images in the directory as well as all of its subdirectories.
     """
-
+    palette_num_colors = None
     if os.path.isfile(directory):
         content_dirs = []
         palettes = []
@@ -407,8 +407,17 @@ def read_palette(directory, do_sort=True):
                 line = line.strip()
                 if len(line) > 0:
                     dir, palette = line.split("\t")
-                    palettes.append(map(make_tuple, palette.split(";")))
-                    content_dirs.append(dir)
+                    palette = map(make_tuple, palette.split(";"))
+                    if len(palette) != palette_num_colors:
+                        if palette_num_colors is None:
+                            palette_num_colors = len(palette)
+                        else:
+                            print("Line %s cannot be parsed. Incorrect number of palette colors. "
+                                  "It should be %d but it's now %d. Ignoring this line."
+                                  %(line, palette_num_colors, len(palette)))
+                    else:
+                        palettes.append(palette)
+                        content_dirs.append(dir)
         if len(content_dirs) == 0:
             raise AssertionError('There is no image in file %s.' % directory)
         if do_sort:

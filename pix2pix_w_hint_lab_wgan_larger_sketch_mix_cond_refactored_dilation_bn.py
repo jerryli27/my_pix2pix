@@ -40,6 +40,7 @@ import collections
 import math
 import time
 import urllib
+import tensorflow.contrib.slim as slim
 
 from general_util import imread, get_all_image_paths
 from neural_util import decode_image, decode_image_with_file_name
@@ -179,19 +180,34 @@ def lrelu(x, a):
         x = tf.identity(x)
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
 
-
-def batchnorm(input, trainable=True):
-    with tf.variable_scope("batchnorm"):
-        # this block looks like it has 3 inputs on the graph unless we do this
-        input = tf.identity(input)
-
-        channels = input.get_shape()[3]
-        offset = tf.get_variable("offset", [channels], dtype=tf.float32, initializer=tf.zeros_initializer, trainable=trainable)
-        scale = tf.get_variable("scale", [channels], dtype=tf.float32, initializer=tf.random_normal_initializer(1.0, 0.02), trainable=trainable)
-        mean, variance = tf.nn.moments(input, axes=[0, 1, 2], keep_dims=False)
-        variance_epsilon = 1e-5
-        normalized = tf.nn.batch_normalization(input, mean, variance, offset, scale, variance_epsilon=variance_epsilon)
+def slim_batch_norm(input, trainable=True):
+    with tf.variable_scope("batchnorm", reuse=None):
+        # TODO: Changing the decay from 0.95 to 0.999, also changing updates_collections from default to None. I don't know if I should change the reuse because my code is different (eval and train not in the same run), but I did.
+        # normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, updates_collections=None, trainable=trainable, is_training= tf.constant(True, dtype=tf.bool)) # True) #a.mode == "train"
+        # return normalized
+        if a.mode == "train":
+            normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, trainable=trainable, updates_collections=None,
+                                         is_training=True)  # I have to use is_training=true all the time, even during test phase, otherwise the output of test set is wierd. I don't update the moving average in test phase anyway.
+        else:
+            # Take away updates_collections makes it update the moving average outside eval step. This can make sure
+            # the output is deterministic and the moving average does not change during testing.
+            # I have to keep is_training to be true, otherwise the output looks wierd.
+            normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, trainable=trainable,
+                                         is_training=True)
         return normalized
+
+# def batchnorm(input, trainable=True):
+#     with tf.variable_scope("batchnorm"):
+#         # this block looks like it has 3 inputs on the graph unless we do this
+#         input = tf.identity(input)
+#
+#         channels = input.get_shape()[3]
+#         offset = tf.get_variable("offset", [channels], dtype=tf.float32, initializer=tf.zeros_initializer, trainable=trainable)
+#         scale = tf.get_variable("scale", [channels], dtype=tf.float32, initializer=tf.random_normal_initializer(1.0, 0.02), trainable=trainable)
+#         mean, variance = tf.nn.moments(input, axes=[0, 1, 2], keep_dims=False)
+#         variance_epsilon = 1e-5
+#         normalized = tf.nn.batch_normalization(input, mean, variance, offset, scale, variance_epsilon=variance_epsilon)
+#         return normalized
 
 
 def deconv(batch_input, out_channels, stride = 2, shift = 4, trainable=True):
@@ -476,7 +492,7 @@ def create_model(inputs, targets, is_hint_off=None):
         # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
         with tf.variable_scope("encoder_1"):
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            output = batchnorm(convolved, trainable=trainable)
+            output = slim_batch_norm(convolved, trainable=trainable)
             rectified = tf.nn.relu(output)  #TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
             layers.append(rectified)
 
@@ -498,7 +514,7 @@ def create_model(inputs, targets, is_hint_off=None):
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
+                output = slim_batch_norm(convolved, trainable=trainable)
                 rectified = tf.nn.relu(output)
                 layers.append(rectified)
         
@@ -529,7 +545,7 @@ def create_model(inputs, targets, is_hint_off=None):
                         input = tf.concat(3, [layers[-1], layers[skip_layer]])
                     # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
                     output = deconv(input, out_channels, 2, 4, trainable=trainable)
-                output = batchnorm(output, trainable=trainable)
+                output = slim_batch_norm(output, trainable=trainable)
                 output = tf.nn.relu(output)
                 layers.append(output)
 
@@ -550,7 +566,7 @@ def create_model(inputs, targets, is_hint_off=None):
         # layer_1: [batch, h, w, in_channels * 2] => [batch, h/2, w/2, ndf]
         with tf.variable_scope("layer_1"):
             convolved = conv(input, a.ndf, stride=2, shift=4)
-            normed = batchnorm(convolved)
+            normed = slim_batch_norm(convolved)
             rectified = lrelu(normed, 0.2)
             layers.append(rectified)
 
@@ -574,7 +590,7 @@ def create_model(inputs, targets, is_hint_off=None):
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=2, shift=4)
 
-                normed = batchnorm(convolved)
+                normed = slim_batch_norm(convolved)
                 rectified = tf.nn.relu(normed)
                 layers.append(rectified)
 
@@ -682,11 +698,18 @@ def create_model(inputs, targets, is_hint_off=None):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator")]
         # discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
         # WGAN does not use momentum based optimizer
-        discrim_optim = tf.train.RMSPropOptimizer(a.lr)
+        # discrim_optim = tf.train.RMSPropOptimizer(a.lr)
         # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
 
+
+
         # WGAN adds a clip and train discriminator 5 times
-        discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # Note: the slim batch norm (and other batch norms) requires updating the moving average of mean and variances
+        # in the batch norm layers. So I cannot use the naive optimizer without updating them.
+        discrim_min = slim.learning.create_train_op(discrim_loss, tf.train.RMSPropOptimizer(a.lr),
+                                                    variables_to_train=discrim_tvars)
+
         discrim_clips = [var.assign(tf.clip_by_value(var, -CLIP_VALUE, CLIP_VALUE)) for var in discrim_tvars]
         with tf.control_dependencies([discrim_min]):
             discrim_train = tf.group(*discrim_clips)
@@ -695,8 +718,19 @@ def create_model(inputs, targets, is_hint_off=None):
         with tf.control_dependencies([discrim_train]):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")]
             # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-            gen_optim = tf.train.RMSPropOptimizer(a.lr)
-            gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+            # gen_optim = tf.train.RMSPropOptimizer(a.lr)
+            # gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+
+            # Same as above, can't use naive optimizer without updates op.
+            gen_train = slim.learning.create_train_op(gen_loss, tf.train.RMSPropOptimizer(a.lr),
+                                                      variables_to_train=gen_tvars)
+
+            # update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, "generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")
+            # if update_ops:
+            #     updates = tf.group(*update_ops)
+            #     with tf.control_dependencies([updates]):
+            #         gen_train = tf.identity(gen_train)
+            #     print("Update_ops: %s" %(str(update_ops)))
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     if a.use_sketch_loss:
@@ -1015,6 +1049,8 @@ def main():
         with tf.Session(config=config) as sess:
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+            if checkpoint is None:
+                raise IOError("Check point %s does not exist!" %(a.checkpoint))
             saver.restore(sess, checkpoint)
             sess.run(tf.initialize_variables(other_var))
             saver = tf.train.Saver(max_to_keep=1)
@@ -1073,6 +1109,11 @@ def main():
 
 
         if a.mode == "test":
+            moving_avg_vars = [var for var in tf.global_variables() if
+                               ("moving_mean" in var.name or "moving_variance" in var.name)]
+            moving_avg_vars_before = sess.run(moving_avg_vars)
+            print("moving_avg_vars_before : %s" % (str(moving_avg_vars_before[0])))
+
             # Testing, run a single epoch over all input data
             for step in range(examples.steps_per_epoch):
                 results = sess.run(display_fetches)
@@ -1085,6 +1126,9 @@ def main():
                         print("Evaluated %d out of %d steps." %(step,examples.steps_per_epoch))
                 index_path = append_index(filesets)
             print("wrote index at", index_path)
+
+            moving_avg_vars_after = sess.run(moving_avg_vars)
+            print("moving_avg_vars_after : %s" %(str(moving_avg_vars_after[0])))
         else:
             # Training
             max_steps = 2**32
