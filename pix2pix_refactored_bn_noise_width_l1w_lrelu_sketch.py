@@ -1,8 +1,31 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-This file loads a checkpoint from trained 128x128 model.
+This file implements the main framework for the Sketch Coloring program. It takes colored images side by side with
+their corresponding sketches and trains to convert one to the other. It is a tensorflow implementation of the
+PaintsChainer project (https://paintschainer.preferred.tech/) with modifications in some details.
+This implementation's framework mainly came from the pix2pix project https://github.com/affinelayer/pix2pix-tensorflow .
+
+Example usage
+TODO: change those example usages.
+# Sanity check
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir sanity_check --max_epochs 2000 --input_dir sanity_check_images --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.1 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --use_hint --lab_colorization
+# Train
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --use_hint --lab_colorization
+# Train 512
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger_sketch_mix --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger_sketch_mix --from_128
+# Test
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix --user_hint_path=BLANK
+
+# To train a network that turns colored images into sketches:
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_mix_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
+# Create the a new sketch database using the pretrained sketch generation network.
+python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/new_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_mix_train_sketch --single_input
+
 """
+
+# This version changes the sketch generator to the same as normal generator that uses the correct batch norm.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -19,30 +42,39 @@ import collections
 import math
 import time
 import urllib
+import tensorflow.contrib.slim as slim
 
 from general_util import imread, get_all_image_paths
 from neural_util import decode_image, decode_image_with_file_name
 from sketches_util import sketch_extractor
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input_dir", required=True, help="path to folder containing images")
+parser.add_argument("--input_dir", required=True, help="Path to folder containing images to be trained, "
+                                                       "or a file containing paths to the images. "
+                                                       "The images should come from running the preprocess program, or "
+                                                       "they have to be sketch images on the left and the "
+                                                       "corresponding colored images on the right.")
 parser.add_argument("--mode", required=True, choices=["train", "test"])
-parser.add_argument("--output_dir", required=True, help="where to put output files")
+parser.add_argument("--output_dir", required=True, help="where to put output files.")
 parser.add_argument("--seed", type=int)
-parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
-parser.add_argument("--user_hint_path", default=None, help="path to a hint image.")
-parser.add_argument("--pretrained_sketch_net_path", default=None, help="path to the pretrained sketch network checkpoint")
+parser.add_argument("--checkpoint", default=None,
+                    help="Directory with checkpoint to resume training from or use for testing")
+parser.add_argument("--user_hint_path", default=None, help="Path to a hint image for testing.")
+parser.add_argument("--pretrained_sketch_net_path", default=None,
+                    help="Path to the pretrained sketch network checkpoint to be used by the sketch loss.")
 parser.add_argument("--single_input", dest="single_input", action="store_true",
-                    help="Input image is a single image instead of a combination of the source and target.")
+                    help="If set, the input image is a single image instead of a combination of the source and target.")
 parser.set_defaults(single_input=False)
 parser.add_argument("--output_ab", dest="output_ab", action="store_true",
                     help="The generator network outputs only ab channel instead of lab. "
-                         "Must be used with lab_colorization.")
+                         "Must be used with lab_colorization. This is for testing grayscale image to colored image "
+                         "conversion.")
 parser.set_defaults(output_ab=False)
 parser.add_argument("--gen_sketch_input", dest="gen_sketch_input", action="store_true",
-                    help="Input image is generated using the sketch generator network.")
+                    help="If set, instead of taking the given sketch image as input, it will generate the input image "
+                         "using the sketch generator network. Intended to be used with sketch loss on. "
+                         "Either the mix probability should be set to 0 or the single_input should be on.")
 parser.set_defaults(gen_sketch_input=False)
-
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
 parser.add_argument("--summary_freq", type=int, default=10, help="update summaries every summary_freq steps")
@@ -54,37 +86,52 @@ parser.add_argument("--display_freq", type=int, default=0, help="write current t
 parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
 
 parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
-parser.add_argument("--lab_colorization", action="store_true", help="split A image into brightness (A) and color (B), ignore B image")
+parser.add_argument("--lab_colorization", action="store_true",
+                    help="If set, it trains images in lab color space instead of rgb.")
 parser.add_argument("--gray_input_a", action="store_true", help="Treat A image as grayscale image.")
 parser.add_argument("--gray_input_b", action="store_true", help="Treat B image as grayscale image.")
-parser.add_argument("--use_hint", action="store_true", help="Supply hints to input. Training dimension 1 -> 4.")
+parser.add_argument("--use_hint", action="store_true",
+                    help="Supply random hint pixels taken from the target as extra input channels.")
 parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
-parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
-parser.add_argument("--ngf", type=int, default=32, help="number of generator filters in first conv layer")
-parser.add_argument("--ndf", type=int, default=32, help="number of discriminator filters in first conv layer")
-parser.add_argument("--scale_size", type=int, default= 572,# 286,
+parser.add_argument("--which_direction", type=str, default="BtoA", choices=["AtoB", "BtoA"],
+                    help="BtoA is for colored to sketch images. AtoB is for the other way around.")
+parser.add_argument("--ngf", type=int, default=32, help="number of generator filters in the first conv layer")
+parser.add_argument("--ndf", type=int, default=32, help="number of discriminator filters in the first conv layer")
+parser.add_argument("--scale_size", type=int, default= 572,
                     help="scale images to this size before cropping to `CROP_SIZE`x`CROP_SIZE`")
 parser.add_argument("--crop_size", type=int, default= 512,
-                    help="scale images to this size before cropping to `CROP_SIZE`x`CROP_SIZE`")
-parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
-parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
+                    help="Crop scaled input images at random positions to this size.")
+parser.add_argument("--flip", dest="flip", action="store_true", help="Randomly flip images horizontally during training.")
+parser.add_argument("--no_flip", dest="flip", action="store_false", help="Disable random flipping during training.")
 parser.set_defaults(flip=True)
-parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
-parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
+parser.add_argument("--noise", dest="noise", action="store_true", help="Randomly add noise to both input and target during training.")
+parser.add_argument("--no_noise", dest="noise", action="store_false", help="Disable random adding noise during training.")
+parser.set_defaults(noise=True)
+parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate")
+# beta1 not used because we're using RMS to be compatible with WGAN.
+# parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
 parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
-parser.add_argument("--gpu_percentage", type=float, default=0.45, help="precent of gpu memory allocated.")
-parser.add_argument("--from_128", dest="from_128", action="store_true", help="Indicate whether model is from 128x128.")
+parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
+parser.add_argument("--gpu_percentage", type=float, default=0.45,
+                    help="The percentage of gpu this program can use. Set to <= 0 for cpu mode.")
+parser.add_argument("--from_128", dest="from_128", action="store_true",
+                    help="Indicate whether model is from a previous model trained on 128x128 images. It should be used "
+                         "when the pretrained model needs to be retrained on a different input size. The model "
+                         "can inherit and reuse most of the parameters from the provided pretrained model.")
 parser.add_argument("--train_sketch", dest="train_sketch", action="store_true",
                     help="Indicate whether the model is for sketch generation. Variable scope will change accordingly.")
 parser.add_argument("--use_sketch_loss", dest="use_sketch_loss", action="store_true",
                     help="Use the pretrained sketch generator network to compare the sketches of the generated image "
-                         "versus that of the original image.")
-parser.add_argument("--sketch_weight", type=float, default=1.0, help="weight on sketch loss term.")
-parser.add_argument("--hint_prob", type=float, default=0.5, help="The probability of having hint as extra input channels.")
-parser.add_argument("--mix_prob", type=float, default=0.5, help="The probability of having old sketch as the input instead of the new one.")
-
-
+                         "versus that of the original image. the `pretrained_sketch_net_path` must be provided.")
+parser.add_argument("--hint_prob", type=float, default=0.5,
+                    help="The probability of providing hints as extra input channels.")
+parser.add_argument("--mix_prob", type=float, default=0.5,
+                    help="The probability of having sketch generated by dilation as the input instead of using the "
+                         "provided input sketches.")
+parser.add_argument("--dilation_sketch_max_width", type=int, default=6,
+                    help="The probability of having sketch generated by dilation as the input instead of using the "
+                         "provided input sketches.")
 
 a = parser.parse_args()
 
@@ -100,18 +147,28 @@ if a.mode != "test" and a.single_input and (a.mix_prob < 1 and not a.gen_sketch_
 if a.output_ab and not a.lab_colorization :
     parser.error("If you want the generator to output only a and b channels, please also add lab_colorization flag.")
 if a.sketch_weight != 10.0:
-    input("Are you sure you don't want sketch_weight to be 10.0?")
+    raw_input("Are you sure you don't want sketch_weight to be 10.0?")
 
-EPS = 1e-12
 CROP_SIZE = a.crop_size  # 128 # 256
-CLIP_VALUE = 0.04  # 0.01
-APPROXIMATE_NUMBER_OF_TOTAL_PARAMETERS = 98218176
-
+# The discriminator weights will be capped at the CLIP_VALUE.
+# In the original WGAN paper it was 0.01, but that value was too small to provide colorful outputs.
+CLIP_VALUE = 0.04
+# The number of parameters to be trained may be different depending on the input size and the ngf and ndf values.
+APPROXIMATE_NUMBER_OF_TOTAL_PARAMETERS = 19523936
 SKETCH_VAR_SCOPE_PREFIX = "sketch_"
+SMALL_NOISE_VAR = 0.02
+LARGE_NOISE_VAR = 0.12
+L1_WEIGHT_DECAY_FACTOR=0.9
+L1_WEIGHT_DECAY_LOWER_THRESHOLD=50
+if a.l1_weight <= L1_WEIGHT_DECAY_LOWER_THRESHOLD:
+    parser.error("l1 weight has to be greater than the lower threshold %d." %(L1_WEIGHT_DECAY_LOWER_THRESHOLD))
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch, input_hints, is_hint_off")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, real_sketches, fake_sketches, discrim_loss, gen_loss_GAN, gen_loss_L1, gen_loss_sketch, train, l1_weight_var")
 
+
+def should(freq, step, max_steps):
+    return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
 
 def conv(batch_input, out_channels, stride, shift=4, pad = 1, trainable=True):
     with tf.variable_scope("conv"):
@@ -128,7 +185,7 @@ def conv(batch_input, out_channels, stride, shift=4, pad = 1, trainable=True):
         return conv
 
 
-def lrelu(x, a):
+def lrelu(x, a=0.2):
     with tf.name_scope("lrelu"):
         # adding these together creates the leak part and linear part
         # then cancels them out by subtracting/adding an absolute value term
@@ -140,7 +197,24 @@ def lrelu(x, a):
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
 
 
+def slim_batch_norm(input, trainable=True):
+    with tf.variable_scope("batchnorm", reuse=None):
+        # TODO: Changing the decay from 0.95 to 0.999, also changing updates_collections from default to None. I don't know if I should change the reuse because my code is different (eval and train not in the same run), but I did.
+        # normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, updates_collections=None, trainable=trainable, is_training= tf.constant(True, dtype=tf.bool)) # True) #a.mode == "train"
+        # return normalized
+        if a.mode == "train":
+            normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, trainable=trainable, updates_collections=None,
+                                         is_training=True)  # I have to use is_training=true all the time, even during test phase, otherwise the output of test set is wierd. I don't update the moving average in test phase anyway.
+        else:
+            # Take away updates_collections makes it update the moving average outside eval step. This can make sure
+            # the output is deterministic and the moving average does not change during testing.
+            # I have to keep is_training to be true, otherwise the output looks wierd.
+            normalized = slim.batch_norm(input, decay=0.999, center=True, scale=True, trainable=trainable,
+                                         is_training=True)
+        return normalized
+
 def batchnorm(input, trainable=True):
+    # This one is buggy because it does not precompute the statistics for test time.
     with tf.variable_scope("batchnorm"):
         # this block looks like it has 3 inputs on the graph unless we do this
         input = tf.identity(input)
@@ -220,7 +294,6 @@ def rgb_to_lab(srgb):
 
         return tf.reshape(lab_pixels, tf.shape(srgb))
 
-
 def lab_to_rgb(lab):
     # Input range for l is 0 ~ 100 and ab is -110 ~ 110
     # Output range is 0 ~ 1....???
@@ -264,18 +337,10 @@ def lab_to_rgb(lab):
 
         return tf.reshape(srgb_pixels, tf.shape(lab))
 
-
-
-
 def load_examples(user_hint = None):
     if not os.path.exists(a.input_dir):
         raise Exception("input_dir does not exist")
 
-    # input_paths = glob.glob(os.path.join(a.input_dir, "*.jpg"))
-    # decode = tf.image.decode_jpeg
-    # if len(input_paths) == 0:
-    #     input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
-    #     decode = tf.image.decode_png
     input_paths = get_all_image_paths(a.input_dir)
     decode = decode_image_with_file_name
 
@@ -309,10 +374,7 @@ def load_examples(user_hint = None):
         # break apart image pair and move to range [-1, 1]
         width = tf.shape(raw_input)[1]  # [height, width, channels]
 
-        # a_images = raw_input[:,:width//2,:] * 2 - 1
-        # b_images = raw_input[:,width//2:,:] * 2 - 1
-
-        # Modified code: change a_images and b_images to 0~1 before turning into grayscale and rescaling.
+        # Note that a_images and b_images have ranges 0~1 before being fed into grayscale and rescaling.
         if a.single_input:
             a_images = raw_input
             b_images = raw_input
@@ -324,40 +386,60 @@ def load_examples(user_hint = None):
         if a.gray_input_b:
             b_images = tf.image.rgb_to_grayscale(b_images)
 
+        # Note there is a subtle difference between first generating sketches on the larger image then rescaling them
+        # (which is what this piece of code is for) and first rescale then generate sketches. First generating sketches
+        # will result in inputs with much denser and messier looking sketches, which is not good when the scale is
+        # small (like 128x128). This only matters when you have input images sizes different from `crop_size` and when
+        # you're trying to train using the sketches generated from the target image using dilation.
+        random_sketch_width = tf.clip_by_value(
+            tf.random_uniform(shape=[], minval=0, maxval=a.dilation_sketch_max_width + 1, dtype=tf.int32,
+                              name="random_sketch_width"), 3, a.dilation_sketch_max_width)
         if a.mix_prob >= 1:
-            a_images = sketch_extractor(b_images, color_space="rgb", max_val=1.0, min_val=0.0)
+            a_images = sketch_extractor(b_images, sketch_width=random_sketch_width, color_space="rgb", max_val=1.0, min_val=0.0)
+            # Large noise for dilation generated sketches, small noise for nn generated sketches.
+            if a.noise:
+                a_images_random_noise = tf.random_normal([1], mean=0.0, stddev=SMALL_NOISE_VAR, name="a_images_random_noise_1") \
+                                        + tf.random_normal([1], mean=0.0, stddev=LARGE_NOISE_VAR, name="a_images_random_noise_2")
+
         elif a.mix_prob <= 0:
             a_images = a_images
+            if a.noise:
+                a_images_random_noise = tf.random_normal([1], mean=0.0, stddev=SMALL_NOISE_VAR, name="a_images_random_noise_1")
         else:
             random_mix_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32,
                                                      name="random_mix_condition")
             mix_prob = tf.constant(a.mix_prob)
             a_images = tf.cond(tf.greater_equal(random_mix_condition, mix_prob), lambda: a_images,
-                               lambda: sketch_extractor(b_images, color_space="rgb", max_val=1.0, min_val=0.0))
+                               lambda: sketch_extractor(b_images, sketch_width=random_sketch_width, color_space="rgb", max_val=1.0, min_val=0.0))
+
+            if a.noise:
+                a_images_random_noise = tf.cond(tf.greater_equal(random_mix_condition, mix_prob),
+                                                lambda:tf.random_normal([1], mean=0.0, stddev=SMALL_NOISE_VAR, name="a_images_random_noise_1"),
+                                                lambda:tf.random_normal([1], mean=0.0, stddev=SMALL_NOISE_VAR, name="a_images_random_noise_1") \
+                                                       + tf.random_normal([1], mean=0.0, stddev=LARGE_NOISE_VAR, name="a_images_random_noise_2"))
+
+        if a.noise:
+            # In original chainer code the noise has stddev = 5 for images with value range 0~255.
+            # Here I use stddev = 0.04 for range -1~1
+            # In original chainer code a second noise with stddev=16 is also added.
+            # Here I use stddev = 0.12
+            b_images_random_noise = tf.random_normal([1],mean=0.0,stddev=SMALL_NOISE_VAR, name="b_images_random_noise")
+            b_images = b_images + b_images_random_noise
+            b_images = tf.clip_by_value(b_images, 0 , 1)
+
+            a_images = a_images + a_images_random_noise
+            # Set all negative input pixels to zero.
+            a_images = tf.clip_by_value(a_images, 0, 1)
+
+
 
         if a.lab_colorization:
-            # if a.which_direction=="AtoB":
-            #     lab = rgb_to_lab(b_images)
-            # else:
-            #     lab = rgb_to_lab(a_images)
-
-            # This doesn't work when I'm trying to train sketch gen...
-            # if a.which_direction=="AtoB":
-            #     lab = rgb_to_lab(b_images)
-            # else:
-            #     lab = rgb_to_lab(a_images)
+            # Assume b image (the image on the right) is the colored image.
             lab = rgb_to_lab(b_images)
             L_chan, a_chan, b_chan = tf.unstack(lab, axis=2)
 
             L_chan = tf.expand_dims(L_chan, axis=2) / 50 - 1 # black and white with input range [0, 100]
             ab_chan = tf.stack([a_chan, b_chan], axis=2) / 110 # color channels with input range ~[-110, 110], not exact
-
-            # if a.which_direction=="AtoB":
-            #     b_images = tf.concat(2,[L_chan, ab_chan])
-            #     a_images =  a_images * 2 - 1
-            # else:
-            #     a_images = tf.concat(2,[L_chan, ab_chan])
-            #     b_images = b_images * 2 - 1
             b_images = tf.concat(2,[L_chan, ab_chan])
             a_images = a_images * 2 - 1
         else:
@@ -379,7 +461,6 @@ def load_examples(user_hint = None):
         r = image
         if a.flip:
             r = tf.image.random_flip_left_right(r, seed=seed)
-
         # area produces a nice downscaling, but does nearest neighbor for upscaling
         # assume we're going to be doing downscaling here
         r = tf.image.resize_images(r, [a.scale_size, a.scale_size], method=tf.image.ResizeMethod.AREA)
@@ -393,20 +474,17 @@ def load_examples(user_hint = None):
 
     def append_hint(inputs, targets, user_hint = None):
         num_hints = 40
+        # Because the inputs are scaled -1~1, the blank hint should default to all -1s.
         blank_hint = np.ones(targets.get_shape().as_list()[:-1] + [4], dtype=np.float32) * -1
-        # blank_hint = np.ones(targets.get_shape().as_list()[:-1] + [3], dtype=np.float32)
         output = tf.get_variable('output', initializer=blank_hint, dtype=tf.float32, trainable=False)
 
         if user_hint is None:
-            # Include the pixels around it ONLY if the current solution fails.
             rd_indices_h = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-3], dtype=tf.int32)
             rd_indices_w = tf.random_uniform([num_hints, 1], minval=0, maxval=targets.get_shape().as_list()[-2], dtype=tf.int32)
             rd_indices_2d = tf.concat(1,(rd_indices_h,rd_indices_w))
 
             targets_rgba = tf.concat(2,(targets,np.ones(targets.get_shape().as_list()[:-1] + [1])))
             hints = tf.gather_nd(targets_rgba, rd_indices_2d)
-
-            # hints = tf.gather_nd(targets, rd_indices)
             clear_hint_op = tf.assign(output, blank_hint)
             random_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32, name="random_hint_condition")
             with tf.control_dependencies([clear_hint_op,hints]):
@@ -424,16 +502,20 @@ def load_examples(user_hint = None):
 
     with tf.name_scope("target_images"):
         target_images = transform(targets)
+
     with tf.name_scope("input_images"):
         input_images = transform(inputs)
 
 
+
+
+        # Please check the note above about the difference between rescale first and generate sketch first.
+        # This code is kept here in case you need to switch to rescaling before generate sketches.
         # random_mix_condition = tf.random_uniform(shape=[], minval=0, maxval=1, dtype=tf.float32,
         #                                          name="random_mix_condition")
         # mix_prob = tf.constant(a.mix_prob)
         # input_images = tf.cond(tf.greater_equal(random_mix_condition, mix_prob), lambda: input_images,
         #                    lambda: sketch_extractor(target_images, max_val=1.0, min_val=-1.0, color_space="lab" if a.lab_colorization else "rgb"))
-
 
         if a.use_hint:
             input_images, input_hints, is_hint_off = append_hint(input_images, target_images, user_hint=user_hint)
@@ -460,74 +542,45 @@ def create_model(inputs, targets, is_hint_off=None):
     def create_generator(generator_inputs, generator_outputs_channels, trainable = True):
         layers = []
 
-        # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+        # encoder_1: [batch, h, w, in_channels] => [batch, h, w, ngf]
         with tf.variable_scope("encoder_1"):
-            # output = conv(generator_inputs, a.ngf, stride=2, trainable=trainable)
-            # output = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            # layers.append(output)
             convolved = conv(generator_inputs, a.ngf, stride=1, shift=3, trainable=trainable)
-            output = batchnorm(convolved, trainable=trainable)
-            # rectified = lrelu(output, 0.2)
-            rectified = tf.nn.relu(output)
+            output = slim_batch_norm(convolved, trainable=trainable)
+            rectified = lrelu(output)  #TODO: maybe test leaky relu instead (like lrelu(output, 0.2))?
             layers.append(rectified)
 
         layer_specs = [
-            a.ngf * 2, # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
-            a.ngf * 2, # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
-            a.ngf * 4, # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
-            a.ngf * 4, # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
-            a.ngf * 8, # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
-            a.ngf * 8, # encoder_7: [batch, 32, 32, ngf * 8] => [batch, 32, 32, ngf * 8]
-            a.ngf * 16, # encoder_8: [batch, 32, 32, ngf * 8] => [batch, 16, 16, ngf * 16]
-            a.ngf * 16, # encoder_9: [batch, 16, 16, ngf * 16] => [batch, 16, 16, ngf * 16]
+            a.ngf * 2, # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 2, # encoder_3: [batch, h/2, w/2, ngf * 2] => [batch, h/2, w/2, ngf * 2]
+            a.ngf * 4, # encoder_4: [batch, h/2, w/2, ngf * 2] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 4, # encoder_5: [batch, h/4, w/4, ngf * 4] => [batch, h/4, w/4, ngf * 4]
+            a.ngf * 8, # encoder_6: [batch, h/4, w/4, ngf * 4] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 8, # encoder_7: [batch, h/8, w/8, ngf * 8] => [batch, h/8, w/8, ngf * 8]
+            a.ngf * 16, # encoder_8: [batch, h/8, w/8, ngf * 8] => [batch, h/16, w/16, ngf * 16]
+            a.ngf * 16, # encoder_9: [batch, h/16, w/16, ngf * 16] => [batch, h/16, w/16, ngf * 16]
         ]
-        #
-        #  layer_specs = [
-        #     a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-        #     a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-        #     a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-        #     a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-        #     a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-        #     a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-        # ]
         for out_channels in layer_specs:
             with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-                # rectified = lrelu(layers[-1], 0.2)
                 if (len(layers) + 1) % 2 == 0:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=2, shift=4, trainable=trainable)
                 else:
-                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3, trainable=trainable)
-                output = batchnorm(convolved, trainable=trainable)
-                rectified = tf.nn.relu(output)
+                output = slim_batch_norm(convolved, trainable=trainable)
+                rectified = lrelu(output)
                 layers.append(rectified)
-        # for out_channels in layer_specs:
-        #     with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-        #         rectified = lrelu(layers[-1], 0.2)
-        #         # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-        #         convolved = conv(rectified, out_channels, stride=2, trainable=trainable)
-        #         output = batchnorm(convolved, trainable=trainable)
-        #         layers.append(output)
-
+        
         layer_specs = [
-            (a.ngf * 16),   # decoder_8: [batch, 16, 16, ngf * 16 * 2]=> [batch, 32, 32, ngf * 16]
-            (a.ngf * 8),   # decoder_7: [batch, 32, 32, ngf * 16] => [batch, 32, 32, ngf * 8]
-            (a.ngf * 8),   # decoder_6: [batch, 32, 32, ngf * 8 * 2] => [batch, 64, 64, ngf * 8]
-            (a.ngf * 4),   # decoder_5: [batch, 64, 64, ngf * 8] => [batch, 64, 64, ngf * 4]
-            (a.ngf * 4),   # decoder_4: [batch, 64, 64, ngf * 4 * 2] => [batch, 128, 128, ngf * 4]
-            (a.ngf * 2),   # decoder_3: [batch, 128, 128, ngf * 4] => [batch, 128, 128, ngf * 2]
-            (a.ngf * 2),       # decoder_2: [batch, 128, 128, ngf * 2 * 2] => [batch, 256, 256, ngf * 2]
-            (a.ngf * 1),                 # decoder_1: [batch, 256, 256, ngf * 2] => [batch, 256, 256, ngf]
+            (a.ngf * 16),   # decoder_8: [batch, h/16, w/16, ngf * 16 * 2]=> [batch, h/8, w/8, ngf * 16]
+            (a.ngf * 8),   # decoder_7: [batch, h/8, w/8, ngf * 16] => [batch, h/8, w/8, ngf * 8]
+            (a.ngf * 8),   # decoder_6: [batch, h/8, w/8, ngf * 8 * 2] => [batch, h/4, w/4, ngf * 8]
+            (a.ngf * 4),   # decoder_5: [batch, h/4, w/4, ngf * 8] => [batch, h/4, w/4, ngf * 4]
+            (a.ngf * 4),   # decoder_4: [batch, h/4, w/4, ngf * 4 * 2] => [batch, h/2, w/2, ngf * 4]
+            (a.ngf * 2),   # decoder_3: [batch, h/2, w/2, ngf * 4] => [batch, h/2, w/2, ngf * 2]
+            (a.ngf * 2),       # decoder_2: [batch, h/2, w/2, ngf * 2 * 2] => [batch, h, w, ngf * 2]
+            (a.ngf * 1),                 # decoder_1: [batch, h, w, ngf * 2] => [batch, h, w, ngf]
         ]
-        # layer_specs = [
-        #     (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-        #     (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-        #     (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-        #     (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-        #     (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-        #     (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-        # ]
         num_encoder_layers = len(layers)
         for decoder_layer, (out_channels) in enumerate(layer_specs):
             skip_layer = num_encoder_layers - decoder_layer - 1
@@ -539,97 +592,63 @@ def create_model(inputs, targets, is_hint_off=None):
                     # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
                     output = deconv(input, out_channels, 1, 3, trainable=trainable)
                 else:
-                    # Can't find concat_v2 so commenting this out.
-                    #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
                     if decoder_layer == 0:
                         input = tf.concat(3, [layers[-1], layers[-2]])
                     else:
                         input = tf.concat(3, [layers[-1], layers[skip_layer]])
                     # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
                     output = deconv(input, out_channels, 2, 4, trainable=trainable)
-                # if decoder_layer == 0:
-                #     # first decoder layer doesn't have skip connections
-                #     # since it is directly connected to the skip_layer
-                #     input = layers[-1]
-                # else:
-                #     # Can't find concat_v2 so commenting this out.
-                #     #input = tf.concat_v2([layers[-1], layers[skip_layer]], axis=3)
-                #     input = tf.concat(3, [layers[-1], layers[skip_layer]])
-                #
-                # rectified = tf.nn.relu(input)
-                # # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-                # output = deconv(rectified, out_channels, trainable=trainable)
-                output = batchnorm(output, trainable=trainable)
-                #
-                # if dropout > 0.0:
-                #     output = tf.nn.dropout(output, keep_prob=1 - dropout)
-                output = tf.nn.relu(output)
+                output = slim_batch_norm(output, trainable=trainable)
+                output = lrelu(output)
                 layers.append(output)
 
-        # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
+        # decoder_1: [batch, h/2, w/2, ngf * 2] => [batch, h, w, generator_outputs_channels]
         with tf.variable_scope("decoder_1"):
-            #input = tf.concat_v2([layers[-1], layers[0]], axis=3)
             input = tf.concat(3,[layers[-1], layers[0]])
             output = deconv(input, generator_outputs_channels, 1, 3, trainable=trainable)
-            # output = tf.tanh(output)
             layers.append(output)
 
         return layers[-1]
 
     def create_discriminator(discrim_inputs, discrim_targets):
-        n_layers = 3
         layers = []
 
         # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
-        # input = tf.concat_v2([discrim_inputs, discrim_targets], axis=3)
         input = tf.concat(3, [discrim_inputs, discrim_targets])
 
-        # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
+        # layer_1: [batch, h, w, in_channels * 2] => [batch, h/2, w/2, ndf]
         with tf.variable_scope("layer_1"):
-            # convolved = conv(input, a.ndf, stride=2)
             convolved = conv(input, a.ndf, stride=2, shift=4)
-            normed = batchnorm(convolved)
+            normed = slim_batch_norm(convolved)
             rectified = lrelu(normed, 0.2)
             layers.append(rectified)
 
-        # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
-        # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
-        # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
+        # layer_2: [batch, h/2, w/2, ndf] => [batch, h/4, w/4, ndf * 2]
+        # layer_3: [batch, h/4, w/4, ndf * 2] => [batch, h/8, w/8, ndf * 4]
+        # layer_4: [batch, h/8, w/8, ndf * 4] => [batch, 31, 31, ndf * 8]
         layer_specs = [
-            a.ndf,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
-            a.ndf * 2,  # encoder_2: [batch, 256, 256, ngf] => [batch, 128, 128, ngf * 2]
-            a.ndf * 2,  # encoder_3: [batch, 128, 128, ngf * 2] => [batch, 128, 128, ngf * 2]
-            a.ndf * 4,  # encoder_4: [batch, 128, 128, ngf * 2] => [batch, 64, 64, ngf * 4]
-            a.ndf * 4,  # encoder_5: [batch, 64, 64, ngf * 4] => [batch, 64, 64, ngf * 4]
-            a.ndf * 8,  # encoder_6: [batch, 64, 64, ngf * 4] => [batch, 32, 32, ngf * 8]
+            a.ndf,  # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
+            a.ndf * 2,  # encoder_2: [batch, h, w, ngf] => [batch, h/2, w/2, ngf * 2]
+            a.ndf * 2,  # encoder_3: [batch, h/2, w/2, ngf * 2] => [batch, h/2, w/2, ngf * 2]
+            a.ndf * 4,  # encoder_4: [batch, h/2, w/2, ngf * 2] => [batch, h/4, w/4, ngf * 4]
+            a.ndf * 4,  # encoder_5: [batch, h/4, w/4, ngf * 4] => [batch, h/4, w/4, ngf * 4]
+            a.ndf * 8,  # encoder_6: [batch, h/4, w/4, ngf * 4] => [batch, h/8, w/8, ngf * 8]
         ]
         for out_channels in layer_specs:
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
                 if (len(layers) + 1) % 2 == 0:
-                    # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+                    # [batch, in_height, in_width, in_channels] => [batch, in_height, in_width, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=1, shift=3)
                 else:
                     # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
                     convolved = conv(layers[-1], out_channels, stride=2, shift=4)
 
-                normed = batchnorm(convolved)
-                # rectified = lrelu(normed, 0.2)
-                rectified = tf.nn.relu(normed)
+                normed = slim_batch_norm(convolved)
+                rectified = lrelu(normed)
                 layers.append(rectified)
-        # for i in range(n_layers):
-        #     with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-        #         out_channels = a.ndf * min(2**(i+1), 8)
-        #         stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
-        #         convolved = conv(layers[-1], out_channels, stride=stride)
-        #         normalized = batchnorm(convolved)
-        #         rectified = lrelu(normalized, 0.2)
-        #         layers.append(rectified)
 
-        # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
+        # layer_5: [batch, h/8, h/8, ndf * 8] => [batch, h/8, h/8, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-            # convolved = conv(rectified, out_channels=1, stride=1)
-            # output = tf.sigmoid(convolved)
-            # layers.append(output)
             # With WGAN, sigmoid for the last layer is no longer needed
             convolved = conv(rectified, out_channels=1, stride=1, shift=3)
             layers.append(convolved)
@@ -639,6 +658,9 @@ def create_model(inputs, targets, is_hint_off=None):
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
             real_sketches = create_generator(targets, 1, trainable=False)
+            # The commented out piece of code is for using the dilation sketch generation instead of the pretrained
+            # sketch generator. TWhen the input image does not contain information about the background, the pretrained
+            # sketch generator works better because it ignores the background when generating sketches.
             # real_sketches = sketch_extractor(targets, color_space="lab" if a.lab_colorization else "rgb")
 
     with tf.variable_scope("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator") as scope:
@@ -654,43 +676,36 @@ def create_model(inputs, targets, is_hint_off=None):
             if a.gen_sketch_input:
                 assert a.use_sketch_loss
                 # Always use the sketch generated as the input if the gen_sketch_input is on.
-                outputs = create_generator(real_sketches,
-                                           out_channels)
+                outputs = create_generator(real_sketches, out_channels)
             else:
-                outputs = create_generator(inputs,
-                                           out_channels)  # if not a.train_sketch else create_sketch_generator(inputs, out_channels)
+                outputs = create_generator(inputs,out_channels)
 
     if a.use_sketch_loss:
         with tf.variable_scope(SKETCH_VAR_SCOPE_PREFIX + "generator", reuse=True) as scope:
             fake_sketches = create_generator(outputs, 1, trainable=False)
+            # Same as the real_sketches line above.
             # fake_sketches = sketch_extractor(outputs, color_space="lab" if a.lab_colorization else "rgb")
 
 
-    # create two copies of discriminator, one for real pairs and one for fake pairs
-    # they share the same underlying variables
+    # Create two copies of the discriminator: one for real pairs and one for fake pairs.
+    # They share the same underlying variables.
     with tf.name_scope("real_discriminator"):
         with tf.variable_scope("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator"):
-            # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
             if a.use_hint:
-                print("creating discr without hint. FOR NOW")
+                # Creating discriminator without feeding in the hint information as part of the input. This makes the
+                # learning process a little bit easier for the discriminator.
                 print(inputs[...,:1].get_shape().as_list())
                 predict_real = create_discriminator(inputs[...,:1], targets)
             else:
                 predict_real = create_discriminator(inputs, targets)
-                # TODO: change back later
-            # predict_real = create_discriminator(inputs, targets)
 
     with tf.name_scope("fake_discriminator"):
         with tf.variable_scope("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator", reuse=True):
-            # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
             if a.use_hint:
-                print("creating discr without hint. FOR NOW")
                 print(inputs[...,:1].get_shape().as_list())
                 predict_fake = create_discriminator(inputs[...,:1], outputs)
             else:
                 predict_fake = create_discriminator(inputs, outputs)
-                # TODO: change back later
-            # predict_fake = create_discriminator(inputs, outputs)
 
     if a.use_hint and a.hint_prob > 0:
         is_hint_off_float = tf.cast(is_hint_off, tf.float32, name="is_hint_off_float")
@@ -719,34 +734,39 @@ def create_model(inputs, targets, is_hint_off=None):
         # # WGAN loss
         # gen_loss_GAN = -tf.reduce_mean(predict_fake)
 
-
-        # WGAN loss
-
+        # WGAN loss, turn on loss only when hint is off.
         if a.use_hint and a.hint_prob >0:
             gen_loss_GAN = -tf.div(tf.reduce_mean(predict_fake * is_hint_off_float), min(a.hint_prob, 1))
         else:
             gen_loss_GAN = -tf.reduce_mean(predict_fake)
 
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+
+        # Because the l1 weight can change during the training, we replace that with a variable.
+        l1_weight_var = tf.Variable(initial_value=a.l1_weight, trainable=False)
         if a.use_sketch_loss:
             gen_loss_sketch = tf.reduce_mean(tf.abs(fake_sketches - real_sketches))
-            gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight + gen_loss_sketch * a.sketch_weight
+            gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * l1_weight_var + gen_loss_sketch * a.sketch_weight
         else:
-            gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+            gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * l1_weight_var
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator")]
         # discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
         # WGAN does not use momentum based optimizer
-        discrim_optim = tf.train.RMSPropOptimizer(a.lr)
+        # discrim_optim = tf.train.RMSPropOptimizer(a.lr)
         # discrim_train = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
 
+
+
         # WGAN adds a clip and train discriminator 5 times
-        discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # discrim_min = discrim_optim.minimize(discrim_loss, var_list=discrim_tvars)
+        # Note: the slim batch norm (and other batch norms) requires updating the moving average of mean and variances
+        # in the batch norm layers. So I cannot use the naive optimizer without updating them.
+        discrim_min = slim.learning.create_train_op(discrim_loss, tf.train.RMSPropOptimizer(a.lr),
+                                                    variables_to_train=discrim_tvars)
+
         discrim_clips = [var.assign(tf.clip_by_value(var, -CLIP_VALUE, CLIP_VALUE)) for var in discrim_tvars]
-        # No difference between control dependencies and group.
-        # with tf.control_dependencies([discrim_min] + discrim_clips):
-        #     discrim_train = tf.no_op("discrim_train")
         with tf.control_dependencies([discrim_min]):
             discrim_train = tf.group(*discrim_clips)
 
@@ -754,8 +774,19 @@ def create_model(inputs, targets, is_hint_off=None):
         with tf.control_dependencies([discrim_train]):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")]
             # gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
-            gen_optim = tf.train.RMSPropOptimizer(a.lr)
-            gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+            # gen_optim = tf.train.RMSPropOptimizer(a.lr)
+            # gen_train = gen_optim.minimize(gen_loss, var_list=gen_tvars)
+
+            # Same as above, can't use naive optimizer without updates op.
+            gen_train = slim.learning.create_train_op(gen_loss, tf.train.RMSPropOptimizer(a.lr),
+                                                      variables_to_train=gen_tvars)
+
+            # update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, "generator" if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")
+            # if update_ops:
+            #     updates = tf.group(*update_ops)
+            #     with tf.control_dependencies([updates]):
+            #         gen_train = tf.identity(gen_train)
+            #     print("Update_ops: %s" %(str(update_ops)))
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     if a.use_sketch_loss:
@@ -764,7 +795,9 @@ def create_model(inputs, targets, is_hint_off=None):
         update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
 
     global_step = tf.contrib.framework.get_or_create_global_step()
-    incr_global_step = tf.assign(global_step, global_step+1)
+    # Because the create_train_op automatically grabs the global step and increases it every time either generator
+    # training or discriminator training is called, here we decrease it by one to correct the global step.
+    incr_global_step = tf.assign(global_step, global_step-1)
 
     return Model(
         predict_real=predict_real,
@@ -777,6 +810,7 @@ def create_model(inputs, targets, is_hint_off=None):
         gen_loss_sketch=ema.average(gen_loss_sketch) if a.use_sketch_loss else None,
         outputs=outputs,
         train=tf.group(update_losses, incr_global_step, gen_train),
+        l1_weight_var=l1_weight_var,
     )
 
 
@@ -792,7 +826,6 @@ def save_images(fetches, image_dir, step=None):
                 kinds.append("hints")
             if a.use_sketch_loss:
                 kinds = kinds + ["real_sketches", "fake_sketches"]
-        # kinds = ["outputs",] if a.single_input else (["inputs", "hints", "outputs", "targets"] if a.use_hint else ["inputs", "outputs", "targets"])
         for kind in kinds:
             if (a.single_input and a.mode == "test"):
                 # Do not modify file name when single input.
@@ -877,6 +910,7 @@ def main():
         # disable these features in test mode
         a.scale_size = CROP_SIZE
         a.flip = False
+        a.noise = False
         if not (a.mix_prob == 1.0 or a.mix_prob <= 0):
             input("Are you sure you don't want to set the mix_prob to 1 (always using the simple sketch generator) or "
                   "0 (always use the input image)?")
@@ -891,7 +925,7 @@ def main():
             user_hint = None
 
     else:
-        assert a.user_hint_path == None # Can't train with one single specified hint image. Doesn't make sense.
+        assert a.user_hint_path == None  # Can't train with one single specified hint image. Doesn't make sense.
         user_hint = None
 
     for k, v in a._get_kwargs():
@@ -904,11 +938,7 @@ def main():
 
     print("examples count = %d" % examples.count)
 
-    # input_ph = tf.placeholder(tf.float32,shape=examples.inputs.get_shape())
-    # target_ph = tf.placeholder(tf.float32,shape=examples.targets.get_shape())
-
     model = create_model(examples.inputs, examples.targets, examples.is_hint_off)
-    # model = create_model(input_ph, target_ph)
 
     def deprocess(image):
         if a.aspect_ratio != 1.0:
@@ -1041,13 +1071,10 @@ def main():
             tf.summary.image("fake_sketches", deprocessed_fake_sketches)
 
     with tf.name_scope("predict_real_summary"):
-        # Changed this because I no longer have tanh in the discriminator. In order for the image to be within range,
-        # I need to apply tanh here.
-        # tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
+        # In order for the image to be within range 0~1, I need to apply tanh here.
         tf.summary.image("predict_real", tf.image.convert_image_dtype((tf.nn.tanh(model.predict_real) + 1) / 2, dtype=tf.uint8))
 
     with tf.name_scope("predict_fake_summary"):
-        # tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
         tf.summary.image("predict_fake", tf.image.convert_image_dtype((tf.nn.tanh(model.predict_fake)) + 1 / 2, dtype=tf.uint8))
 
     tf.summary.scalar("discriminator_loss", model.discrim_loss)
@@ -1058,6 +1085,10 @@ def main():
 
     with tf.name_scope("parameter_count"):
         parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
+
+    with tf.name_scope("assign_l1_weight"):
+        new_l1_weight_ph = tf.placeholder(tf.float32,name="new_l1_weight_ph")
+        l1_weight_assign_op = tf.assign(model.l1_weight_var, new_l1_weight_ph)
 
     image_dir = os.path.join(a.output_dir, "images")
     if not os.path.exists(image_dir):
@@ -1070,9 +1101,7 @@ def main():
         config = tf.ConfigProto(
             device_count = {'GPU': 0}
         )
-    # Get all variables in the model.
-    # TODO: Only need to do this once when I load from 128x128 model. I should disable this part if the model does not
-    # come from 128x128.
+
     if a.from_128:
         generator_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator' if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "generator")
         discriminator_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator' if not a.train_sketch else SKETCH_VAR_SCOPE_PREFIX + "discriminator")
@@ -1084,13 +1113,15 @@ def main():
         with tf.Session(config=config) as sess:
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+            if checkpoint is None:
+                raise IOError("Check point %s does not exist!" %(a.checkpoint))
             saver.restore(sess, checkpoint)
             sess.run(tf.initialize_variables(other_var))
             saver = tf.train.Saver(max_to_keep=1)
             saver.save(sess,checkpoint)
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        if a.use_sketch_loss and a.mode != "test" and a.checkpoint is None:
+        if a.use_sketch_loss and a.mode != "test" and a.checkpoint is None: # and a.checkpoint is None:
             sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
             # This is a sanity check to make sure sketch variables are not trainable.
             assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
@@ -1112,6 +1143,8 @@ def main():
                 saver.save(sess,save_path=os.path.join(a.output_dir, "model"))
         else:
             saver = tf.train.Saver(max_to_keep=1)
+        # The code commented out is for when one wants to switch from the pretrained sketch generator for sketch loss
+        # to the dilation sketch generator.
         # sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
         # if not a.train_sketch:
         #     assert len(sketch_var) == 0
@@ -1140,8 +1173,15 @@ def main():
 
 
         if a.mode == "test":
-            # testing
-            # run a single epoch over all input data
+            # DEBUG: try to print moving average
+            moving_avg_vars = [var for var in tf.global_variables() if
+                               ("moving_mean" in var.name or "moving_variance" in var.name)]
+            moving_avg_vars_before = sess.run(moving_avg_vars)
+            print("moving_avg_vars_before : %s" %(str(moving_avg_vars_before[0])))
+
+
+
+            # Testing, run a single epoch over all input data
             for step in range(examples.steps_per_epoch):
                 results = sess.run(display_fetches)
                 filesets = save_images(results, image_dir)
@@ -1153,85 +1193,73 @@ def main():
                         print("Evaluated %d out of %d steps." %(step,examples.steps_per_epoch))
                 index_path = append_index(filesets)
             print("wrote index at", index_path)
+
+            moving_avg_vars_after = sess.run(moving_avg_vars)
+            print("moving_avg_vars_after : %s" %(str(moving_avg_vars_after[0])))
         else:
-            # training
+            current_l1_weight, = sess.run([model.l1_weight_var])
+            print("Current l1 weight is %f." % (current_l1_weight,))
+            # Training
             max_steps = 2**32
             if a.max_epochs is not None:
                 max_steps = examples.steps_per_epoch * a.max_epochs
             if a.max_steps is not None:
                 max_steps = a.max_steps
 
+
             initial_global_step, = sess.run([sv.global_step])
 
+            # # Try assigning l1 weight for debugging
+            # current_l1_weight, = sess.run([model.l1_weight_var])
+            # new_l1_weight = max(current_l1_weight * L1_WEIGHT_DECAY_FACTOR, L1_WEIGHT_DECAY_LOWER_THRESHOLD)
+            # sess.run([l1_weight_assign_op], feed_dict={new_l1_weight_ph:new_l1_weight})
+            # assert new_l1_weight == sess.run([model.l1_weight_var])[0]
+            # print("Debug updating l1 weight, it is currently %f." % (new_l1_weight,))
+
             start_time = time.time()
-            for step in range(max_steps):
-                def should(freq):
-                    return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
+            for step in range(initial_global_step+1, max_steps):
 
                 options = None
                 run_metadata = None
-                if should(a.trace_freq):
+                if should(a.trace_freq, step, max_steps):
                     options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                     run_metadata = tf.RunMetadata()
 
-                # # First get input and target
-                # io_fetches = {
-                #     "inputs": examples.inputs,
-                #     "targets": examples.targets
-                # }
-                # # if should(a.display_freq):
-                # #     io_fetches["display"] = display_fetches
-                # io_results = sess.run(io_fetches, options=options, run_metadata=run_metadata)
-                #
-                # print(np.sum(io_results["inputs"][...,1:]))
-                # print(np.sum(io_results["targets"]))
                 fetches = {
                     "train": model.train,
                     "global_step": sv.global_step,
                 }
 
-                if should(a.progress_freq):
+                if should(a.progress_freq, step, max_steps):
                     fetches["discrim_loss"] = model.discrim_loss
                     fetches["gen_loss_GAN"] = model.gen_loss_GAN
                     fetches["gen_loss_L1"] = model.gen_loss_L1
                     if a.use_sketch_loss:
                         fetches["gen_loss_sketch"] = model.gen_loss_sketch
 
-                if should(a.summary_freq):
+                if should(a.summary_freq, step, max_steps):
                     fetches["summary"] = sv.summary_op
 
-                if should(a.display_freq):
+                if should(a.display_freq, step, max_steps):
                     fetches["display"] = display_fetches
 
-                # Without this step the hints won't be updated.
-                # if a.use_hint:
-                #     fetches["inputs"] = examples.inputs
-                #     fetches["update_hint"] = examples.input_hints
-                #     fetches["deprocessed_hints"] = deprocessed_hints
-
-                # results = sess.run(fetches, options=options, run_metadata=run_metadata,
-                #                    feed_dict={input_ph:io_results["inputs"], target_ph:io_results["targets"]})
                 results = sess.run(fetches, options=options, run_metadata=run_metadata)
+                global_step = results["global_step"]
+                # print("Current step: %d, current global step:%d" %(step, global_step))
 
-                # print(np.sum(results["update_hint"]))
-                # print(np.sum(results["inputs"][...,1:]))
-                # print(np.sum(results["deprocessed_hints"]))
-
-                if should(a.summary_freq):
+                if should(a.summary_freq, step, max_steps):
                     sv.summary_writer.add_summary(results["summary"], results["global_step"])
 
-                if should(a.display_freq):
+                if should(a.display_freq, step, max_steps):
                     print("saving display images")
                     filesets = save_images(results["display"], image_dir, step=results["global_step"])
-                    # filesets = save_images(io_results["display"], image_dir, step=results["global_step"])
                     append_index(filesets, step=True)
 
-                if should(a.trace_freq):
+                if should(a.trace_freq, step, max_steps):
                     print("recording trace")
                     sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
 
-                if should(a.progress_freq):
-                    global_step = results["global_step"]
+                if should(a.progress_freq, step, max_steps):
                     print("progress  epoch %d  step %d  image/sec %0.1f" % (global_step // examples.steps_per_epoch, global_step % examples.steps_per_epoch, (global_step - initial_global_step) * a.batch_size / (time.time() - start_time)))
                     print("discrim_loss", results["discrim_loss"])
                     print("gen_loss_GAN", results["gen_loss_GAN"])
@@ -1239,43 +1267,22 @@ def main():
                     if a.use_sketch_loss:
                         print("gen_loss_sketch", results["gen_loss_sketch"])
 
-                if should(a.save_freq):
+                # Decrease the weight of
+                if should(examples.steps_per_epoch, step, max_steps):
+                    current_l1_weight, = sess.run([model.l1_weight_var])
+                    new_l1_weight = max(current_l1_weight * L1_WEIGHT_DECAY_FACTOR, L1_WEIGHT_DECAY_LOWER_THRESHOLD)
+                    sess.run([l1_weight_assign_op], feed_dict={new_l1_weight_ph:new_l1_weight})
+                    if not abs(new_l1_weight - sess.run([model.l1_weight_var])[0]) <= 1:
+                        raise AssertionError("Failed to update l1 weight from %f to %f." %(current_l1_weight, new_l1_weight))
+                    print("New epoch! Updating l1 weight from %f to %f." %(current_l1_weight, new_l1_weight))
+
+
+                if should(a.save_freq, step, max_steps):
                     print("saving model")
                     saver.save(sess, os.path.join(a.output_dir, "model"), global_step=sv.global_step)
 
                 if sv.should_stop():
                     break
 
-
-main()
-
-"""
---mode train --output_dir sanity_check_train --max_epochs 200 --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --display_freq=5 --use_hint
---mode test --output_dir sanity_check_test --input_dir /home/xor/pixiv_full_128_combined/tiny --which_direction AtoB --gray_input_a --use_hint --checkpoint sanity_check_train
-"""
-"""
-# Sanity check
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir pix2pix_w_hint_lab_wgan_larger_sketch_mix_sanity_check --max_epochs 2000 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/tiny --which_direction AtoB --display_freq=200 --gray_input_a --batch_size 1 --lr 0.0008 --gpu_percentage 0.1 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --use_hint --lab_colorization
-# Train
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.75 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_train_sketch --use_hint --lab_colorization
-# Train 512
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir pixiv_downloaded_512_w_hint_lab_wgan_larger_sketch_mix --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_512_combined/train --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.9 --scale_size=572 --crop_size=512 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_512_w_hint_lab_wgan_larger_sketch_mix --from_128
-# TO train a network that turns colored images into sketches:
-python pix2pix_w_hint_512.py --mode train --output_dir pixiv_full_128_to_sketch_train --max_epochs 20 --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/train --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.002 --gpu_percentage 0.45 --scale_size=143 --crop_size=128
-
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode train --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_mix_train_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/train/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_mix_train_sketch_test --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/sketch_colored_pair_128_combined_cleaned/sketch_colored_pair_128_combined/test/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_mix_train_sketch
-# Test
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix_test_with_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix_test_no_hint --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128_combined/test --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix --user_hint_path=BLANK
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix_test_no_hint --max_epochs 20 --input_dir sketches_combined --which_direction AtoB --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.45 --scale_size=143 --crop_size=128 --use_sketch_loss --pretrained_sketch_net_path pixiv_full_128_to_sketch_train --use_hint --lab_colorization --checkpoint=pixiv_downloaded_128_w_hint_lab_wgan_larger_sketch_mix --user_hint_path=BLANK
-
-# Create the new sketch database.
-python pix2pix_w_hint_lab_wgan_larger_sketch_mix.py --mode test --output_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/new_sketch --max_epochs 20 --input_dir /mnt/data_drive/home/ubuntu/pixiv_downloaded_sketches_lnet_128/color/ --which_direction BtoA --display_freq=1000 --gray_input_a --batch_size 4 --lr 0.0008 --gpu_percentage 0.25 --scale_size=143 --crop_size=128 --lab_colorization --train_sketch --checkpoint=sketch_colored_pair_cleaned_128_w_hint_lab_wgan_larger_sketch_mix_train_sketch --single_input
-"""
-
-"""
-python pix2pix_w_hint.py --mode test --output_dir pixiv_full_128_w_hint_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_w_hint_train --gpu_percentage 0.45 --use_hint
-python pix2pix_w_hint.py --mode test --output_dir pixiv_full_128_tiny_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_tiny --gpu_percentage 0.45 --use_hint
-python pix2pix_w_hint.py --mode test --output_dir pixiv_full_128_w_hint_test --input_dir /mnt/tf_drive/home/ubuntu/pixiv_full_128_combined/test --checkpoint pixiv_full_128_w_hint_train --gpu_percentage 0.45 --use_hint --user_hint_path=BLANK
-"""
+if __name__ == "__main__":
+    main()

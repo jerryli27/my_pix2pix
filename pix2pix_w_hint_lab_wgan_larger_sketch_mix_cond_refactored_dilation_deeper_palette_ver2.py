@@ -1131,7 +1131,7 @@ def main():
             saver.save(sess,checkpoint)
     else:
         # If there is a checkpoint, then the sketch generator variables should already be stored in there.
-        # if a.use_sketch_loss and a.mode != "test": # and a.checkpoint is None:
+        # if a.use_sketch_loss and a.mode != "test" and a.checkpoint is None:
         #     sketch_var = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=SKETCH_VAR_SCOPE_PREFIX + "generator")
         #     # This is a sanity check to make sure sketch variables are not trainable.
         #     assert len(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,

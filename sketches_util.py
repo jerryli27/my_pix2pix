@@ -13,11 +13,13 @@ from PIL import ImageStat
 from scipy.stats import threshold
 
 from general_util import *
-
-neiborhood8 = np.array([[1, 1, 1],
-                            [1, 1, 1],
-                            [1, 1, 1]],
-                            np.uint8)
+#
+# neiborhood8 = np.array([[1, 1, 1],
+#                         [1, 1, 1],
+#                         [1, 1, 1]],
+#                        np.uint8)
+neiborhood8 = np.array([[1 for i in range(3)] for j in range(3)],
+                       np.uint8)
 
 def image_to_sketch(img):
     """
@@ -105,7 +107,7 @@ def image_to_sketch_experiment(img):
         print('Image has to be either of shape (height, width, num_features) or (batch_size, height, width, num_features)')
         raise AssertionError
 
-def sketch_extractor(images, color_space, max_val=1.0, min_val=-1.0):
+def sketch_extractor(images, color_space, sketch_width=3, max_val=1.0, min_val=-1.0):
     images = (images - min_val) / (max_val - min_val) * 255.0
     image_shape = images.get_shape().as_list()
     is_single_image = False
@@ -129,10 +131,16 @@ def sketch_extractor(images, color_space, max_val=1.0, min_val=-1.0):
         gray_images = images
     else:
         raise AssertionError("Input image must have shape [batch_size, height, width, 1 or 3]")
-    filt = np.expand_dims(np.array([[1, 1, 1],
-                                    [1, 1, 1],
-                                    [1, 1, 1]],
-                                    np.uint8), axis=2)
+    # filt = np.expand_dims(np.array([[1, 1, 1],
+    #                                 [1, 1, 1],
+    #                                 [1, 1, 1]],
+    #                                 np.uint8), axis=2)
+    assertion = tf.assert_greater_equal(sketch_width, 3,
+                                 message="sketch_width has to be greater than 3 for dilation to work properly.")
+    with tf.control_dependencies([assertion]):
+        filt = tf.ones((sketch_width,sketch_width,1),)
+    # filt = np.expand_dims(np.array([[1 for i in range(18)] for j in range(18)],
+    #                        np.uint8), axis=2)
     # filt = np.expand_dims(np.array([[1, 1, 1, 1, 1],
     #                                 [1, 1, 1, 1, 1],
     #                                 [1, 1, 1, 1, 1],

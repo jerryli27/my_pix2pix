@@ -4,15 +4,16 @@ import general_util
 from sketches_util import *
 
 class TestImageToSketchesUtil(tf.test.TestCase):
-    def test_image_to_sketch_experiment(self):
-        img = general_util.imread('2821993.jpg') # '12746957.jpg')
-        sketch = image_to_sketch_experiment(img)
-        cv2.imshow('Input', cv2.cvtColor(img, cv2.COLOR_RGB2BGR).astype(np.uint8))
-        cv2.imshow('Sketch', sketch.astype(np.uint8))
-        cv2.waitKey(0)
+    # def test_image_to_sketch_experiment(self):
+    #     img = general_util.imread('2821993.jpg') #'12746957.jpg')#
+    #     sketch = image_to_sketch_experiment(img)
+    #     cv2.imshow('Input', cv2.cvtColor(img, cv2.COLOR_RGB2BGR).astype(np.uint8))
+    #     cv2.imshow('Sketch', sketch.astype(np.uint8))
+    #     cv2.waitKey(0)
     def test_get_tf_string_extension(self):
         with self.test_session(config = tf.ConfigProto(device_count = {'GPU': 0})) as sess:
-            img = general_util.imread('/home/jerryli27/PycharmProjects/my_pix2pix/test_collected_sketches_cropped/1383646_p0.jpg.png.png',dtype=np.uint8)  # '12746957.jpg')
+            # img = general_util.imread('/home/jerryli27/PycharmProjects/my_pix2pix/test_collected_sketches_cropped/1383646_p0.jpg.png.png',dtype=np.uint8)  # '12746957.jpg')
+            img = general_util.imread('2821993.jpg',dtype=np.uint8)  # '12746957.jpg')
             sketch = tf.image.convert_image_dtype(sketch_extractor(tf.image.convert_image_dtype(img, tf.float32) ,"rgb", max_val=1, min_val=0), tf.uint8)
             actual_output, = sess.run([sketch])
             cv2.imshow('Input', cv2.cvtColor(img, cv2.COLOR_RGB2BGR).astype(np.uint8))

@@ -34,5 +34,37 @@ class PreprocessUtilTest(tf.test.TestCase):
             coord.join(threads)
             sess.close()
 
+    def test_resize_image(self):
+        bw_file_names = get_all_image_paths("bw_test_images/bw/")
+        colored_file_names = get_all_image_paths("bw_test_images/colored/")
+        input_file_names = bw_file_names + colored_file_names
+
+        with self.test_session(config = tf.ConfigProto(device_count = {'GPU': 0})) as sess:
+            # Save test image
+
+            reader = tf.WholeFileReader()
+            filename_queue = tf.train.string_input_producer(input_file_names)
+            paths, contents = reader.read(filename_queue)
+            image_decoded = decode_image_with_file_name(contents, paths, channels=3)
+            # image_float = tf.image.convert_image_dtype(image_decoded, dtype=tf.float32)
+
+            h,w = get_image_hw(image_decoded)
+            image_resized = resize_image(image_decoded, h, w, resize_mode="crop", new_size=512)
+
+            coord = tf.train.Coordinator()
+            threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+
+            for i in range(len(input_file_names)):
+                current_path,actual_output, = sess.run([paths, image_resized])
+                # expected_output = current_path in colored_file_names
+                # tf.assert_equal(actual_output, expected_output)
+                # print("%s is %s" %(current_path, "colored" if expected_output else "grayscale"))
+                cv2.imshow('Resized', actual_output.astype(np.uint8))
+                cv2.waitKey(0)
+
+            coord.request_stop()
+            coord.join(threads)
+            sess.close()
+
 if __name__ == '__main__':
     tf.test.main()
